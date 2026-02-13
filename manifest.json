@@ -1,0 +1,11 @@
+{
+  "name": "Charlie Parker's Mind",
+  "short_name": "Bird",
+  "description": "Jazz ear training game - learn Charlie Parker solos",
+  "start_url": "/game.html",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#000000",
+  "theme_color": "#000000",
+  "icons": []
+}

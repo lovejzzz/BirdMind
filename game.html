@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="theme-color" content="#000000">
+    <title>Charlie Parker's Mind</title>
+    <link rel="icon" type="image/svg+xml" href="favicon.svg">
+    <link rel="manifest" href="manifest.json">
+    <link rel="stylesheet" href="game.css?v=2">
+</head>
+<body style="overscroll-behavior: none; touch-action: manipulation;">
+    <!-- Song Selection Screen -->
+    <div id="song-select-screen" class="screen active">
+        <div class="header">
+            <h1>CHARLIE PARKER'S MIND</h1>
+            <p class="subtitle">[ EAR TRAINING ]</p>
+            <div class="version">v0.1</div>
+        </div>
+        <div id="song-list" class="song-list"></div>
+        <div class="footer">
+            <div class="footer-links">
+                <a href="#" id="stats-link" class="footer-link">Stats</a>
+                <a href="#" id="settings-link" class="footer-link">Settings</a>
+                <a href="#" id="about-link" class="footer-link">About</a>
+            </div>
+        </div>
+    </div>
+
+    <!-- Game Screen -->
+    <div id="game-screen" class="screen">
+        <div class="game-header">
+            <button id="back-btn" class="back-btn">← </button>
+            <div class="song-info">
+                <div id="song-title" class="song-title"></div>
+                <div id="fragment-info" class="fragment-info"></div>
+            </div>
+            <div id="score-display" class="score-display">0</div>
+        </div>
+        <div class="progress-bar-container">
+            <div id="progress-bar" class="progress-bar"></div>
+        </div>
+
+        <div class="staff-container">
+            <!-- Pixel art bird mascot -->
+            <div id="bird-mascot" class="bird-mascot">
+                <svg viewBox="0 0 32 32" width="64" height="64">
+                    <!-- Bird body (pixel art style) -->
+                    <rect x="10" y="8" width="2" height="2" fill="#FF8C00"/>
+                    <rect x="12" y="8" width="2" height="2" fill="#FF8C00"/>
+                    <rect x="14" y="6" width="2" height="2" fill="#FF8C00"/>
+                    <rect x="16" y="6" width="2" height="2" fill="#FF8C00"/>
+                    <rect x="18" y="8" width="2" height="2" fill="#FF8C00"/>
+                    <rect x="20" y="8" width="2" height="2" fill="#FF8C00"/>
+                    <rect x="8" y="10" width="2" height="2" fill="#FF8C00"/>
+                    <rect x="10" y="10" width="2" height="2" fill="#FF8C00"/>
+                    <rect x="12" y="10" width="2" height="2" fill="#FF8C00"/>
+                    <rect x="14" y="10" width="2" height="2" fill="#FF8C00"/>
+                    <rect x="16" y="10" width="2" height="2" fill="#FF8C00"/>
+                    <rect x="18" y="10" width="2" height="2" fill="#FF8C00"/>
+                    <rect x="20" y="10" width="2" height="2" fill="#FF8C00"/>
+                    <rect x="22" y="10" width="2" height="2" fill="#FF8C00"/>
+                    <!-- Eye -->
+                    <rect x="18" y="10" width="2" height="2" fill="#000"/>
+                    <!-- Body -->
+                    <rect x="10" y="12" width="2" height="2" fill="#FF8C00"/>
+                    <rect x="12" y="12" width="2" height="2" fill="#FF8C00"/>
+                    <rect x="14" y="12" width="2" height="2" fill="#FF8C00"/>
+                    <rect x="16" y="12" width="2" height="2" fill="#FF8C00"/>
+                    <rect x="18" y="12" width="2" height="2" fill="#FF8C00"/>
+                    <rect x="20" y="12" width="2" height="2" fill="#FF8C00"/>
+                    <!-- Wing -->
+                    <rect x="12" y="14" width="2" height="2" fill="#FF8C00"/>
+                    <rect x="14" y="14" width="2" height="2" fill="#FF8C00"/>
+                    <rect x="16" y="14" width="2" height="2" fill="#FF8C00"/>
+                    <rect x="18" y="14" width="2" height="2" fill="#FF8C00"/>
+                    <!-- Legs -->
+                    <rect x="12" y="16" width="2" height="2" fill="#FF8C00"/>
+                    <rect x="18" y="16" width="2" height="2" fill="#FF8C00"/>
+                </svg>
+            </div>
+            <svg id="staff-svg" viewBox="0 0 800 200"></svg>
+            <!-- Interval display -->
+            <div id="interval-display" class="interval-display"></div>
+        </div>
+
+        <div class="controls-container">
+            <!-- Settings gear (collapsible) -->
+            <button id="settings-gear" class="settings-gear" aria-label="Settings">⚙</button>
+            <div id="settings-panel" class="settings-panel">
+                <div class="slider-group">
+                    <label for="speed-slider">Speed: <span id="speed-value">100%</span></label>
+                    <input type="range" id="speed-slider" min="0.5" max="1.0" step="0.05" value="1.0">
+                </div>
+                <div class="slider-group">
+                    <label for="volume-slider">Volume: <span id="volume-value">100%</span></label>
+                    <input type="range" id="volume-slider" min="0" max="1" step="0.1" value="1.0">
+                </div>
+            </div>
+            
+            <div class="action-buttons">
+                <button id="replay-btn" class="action-btn">
+                    <span class="btn-icon">►</span>
+                    <span class="btn-label">LISTEN</span>
+                </button>
+                <button id="submit-btn" class="action-btn">
+                    <span class="btn-icon">✓</span>
+                    <span class="btn-label">CHECK</span>
+                </button>
+                <button id="next-btn" class="action-btn" style="display: none;">
+                    <span class="btn-icon">→</span>
+                    <span class="btn-label">NEXT</span>
+                </button>
+                <button id="play-answer-btn" class="action-btn" style="display: none;">
+                    <span class="btn-icon">♫</span>
+                    <span class="btn-label">HEAR</span>
+                </button>
+            </div>
+            
+            <div class="utility-buttons">
+                <button id="undo-btn" class="util-btn" aria-label="Undo">↶</button>
+                <button id="skip-btn" class="util-btn" aria-label="Skip">⏭</button>
+                <button id="show-answer-btn" class="util-btn" aria-label="Show Answer">👁</button>
+            </div>
+
+            <div class="dpad-container">
+                <div class="dpad">
+                    <button id="up-btn" class="dpad-btn dpad-up">▲</button>
+                    <button id="left-btn" class="dpad-btn dpad-left">◄</button>
+                    <div class="dpad-center">♪</div>
+                    <button id="right-btn" class="dpad-btn dpad-right">►</button>
+                    <button id="down-btn" class="dpad-btn dpad-down">▼</button>
+                </div>
+            </div>
+            
+            <div class="keyboard-hint desktop-only">
+                Space=Listen | Enter=Check | Arrows=Move | U=Undo
+            </div>
+        </div>
+    </div>
+
+    <!-- Loading overlay -->
+    <div id="loading-overlay" class="loading-overlay">
+        <div class="loading-content">
+            <div class="loading-bird">
+                <svg width="48" height="48" viewBox="0 0 16 16">
+                    <path fill="var(--fg)" d="M8,2 L10,4 L12,4 L14,6 L14,8 L12,8 L12,10 L10,10 L8,12 L6,10 L4,10 L4,8 L2,8 L2,6 L4,6 L6,4 L8,2 M10,6 L11,6 L11,7 L10,7 Z"/>
+                </svg>
+            </div>
+            <div id="loading-text" class="loading-text">Loading...</div>
+        </div>
+    </div>
+    
+    <!-- Result overlay (shown after each fragment) -->
+    <div id="result-overlay" class="result-overlay"></div>
+    
+    <!-- Score summary overlay (end of song) -->
+    <div id="summary-overlay" class="summary-overlay"></div>
+
+    <!-- Stats Screen -->
+    <div id="stats-screen" class="screen">
+        <div class="header">
+            <h1>STATISTICS</h1>
+            <button id="stats-back-btn" class="back-btn" style="position: absolute; left: 0.5rem; top: 0.5rem;">← Back</button>
+        </div>
+        <div class="stats-content">
+            <div class="stat-card">
+                <div class="stat-label">Level</div>
+                <div class="stat-value" id="stat-level">1</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">XP</div>
+                <div class="stat-value" id="stat-xp">0</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Songs Completed</div>
+                <div class="stat-value" id="stat-songs">0</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Total Notes</div>
+                <div class="stat-value" id="stat-notes">0</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Accuracy</div>
+                <div class="stat-value" id="stat-accuracy">0%</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Achievements</div>
+                <div class="stat-value" id="stat-achievements">0</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Settings Screen -->
+    <div id="settings-screen" class="screen">
+        <div class="header">
+            <h1>SETTINGS</h1>
+            <button id="settings-back-btn" class="back-btn" style="position: absolute; left: 0.5rem; top: 0.5rem;">← Back</button>
+        </div>
+        <div class="settings-content">
+            <div class="setting-item">
+                <label>
+                    <input type="checkbox" id="setting-note-names" checked>
+                    <span>Show Note Names</span>
+                </label>
+            </div>
+            <div class="setting-item">
+                <label>
+                    <input type="checkbox" id="setting-intervals" checked>
+                    <span>Show Intervals</span>
+                </label>
+            </div>
+            <div class="setting-item">
+                <label>
+                    <input type="checkbox" id="setting-scale-degrees">
+                    <span>Show Scale Degrees</span>
+                </label>
+            </div>
+            <div class="setting-item">
+                <label for="setting-default-speed">Default Speed</label>
+                <input type="range" id="setting-default-speed" min="0.5" max="1.0" step="0.05" value="1.0">
+                <span id="setting-speed-value">100%</span>
+            </div>
+            <div class="setting-item">
+                <label for="setting-default-volume">Default Volume</label>
+                <input type="range" id="setting-default-volume" min="0" max="1" step="0.1" value="1.0">
+                <span id="setting-volume-value">100%</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Audio elements -->
+    <audio id="reference-audio" preload="auto"></audio>
+
+    <!-- Welcome Splash (first visit only) -->
+    <div id="welcome-splash" class="welcome-splash">
+        <div class="welcome-bird">
+            <svg viewBox="0 0 32 32" width="96" height="96">
+                <rect x="10" y="8" width="2" height="2" fill="#FF8C00"/>
+                <rect x="12" y="8" width="2" height="2" fill="#FF8C00"/>
+                <rect x="14" y="6" width="2" height="2" fill="#FF8C00"/>
+                <rect x="16" y="6" width="2" height="2" fill="#FF8C00"/>
+                <rect x="18" y="8" width="2" height="2" fill="#FF8C00"/>
+                <rect x="20" y="8" width="2" height="2" fill="#FF8C00"/>
+                <rect x="8" y="10" width="2" height="2" fill="#FF8C00"/>
+                <rect x="10" y="10" width="2" height="2" fill="#FF8C00"/>
+                <rect x="12" y="10" width="2" height="2" fill="#FF8C00"/>
+                <rect x="14" y="10" width="2" height="2" fill="#FF8C00"/>
+                <rect x="16" y="10" width="2" height="2" fill="#FF8C00"/>
+                <rect x="18" y="10" width="2" height="2" fill="#FF8C00"/>
+                <rect x="20" y="10" width="2" height="2" fill="#FF8C00"/>
+                <rect x="22" y="10" width="2" height="2" fill="#FF8C00"/>
+                <rect x="18" y="10" width="2" height="2" fill="#000"/>
+                <rect x="10" y="12" width="2" height="2" fill="#FF8C00"/>
+                <rect x="12" y="12" width="2" height="2" fill="#FF8C00"/>
+                <rect x="14" y="12" width="2" height="2" fill="#FF8C00"/>
+                <rect x="16" y="12" width="2" height="2" fill="#FF8C00"/>
+                <rect x="18" y="12" width="2" height="2" fill="#FF8C00"/>
+                <rect x="20" y="12" width="2" height="2" fill="#FF8C00"/>
+                <rect x="12" y="14" width="2" height="2" fill="#FF8C00"/>
+                <rect x="14" y="14" width="2" height="2" fill="#FF8C00"/>
+                <rect x="16" y="14" width="2" height="2" fill="#FF8C00"/>
+                <rect x="18" y="14" width="2" height="2" fill="#FF8C00"/>
+                <rect x="12" y="16" width="2" height="2" fill="#FF8C00"/>
+                <rect x="18" y="16" width="2" height="2" fill="#FF8C00"/>
+            </svg>
+        </div>
+        <div class="welcome-title"></div>
+    </div>
+
+    <!-- How to Play Overlay (first game only) -->
+    <div id="how-to-play" class="how-to-play-overlay">
+        <div class="how-to-play-content">
+            <div class="how-to-play-title">HOW TO PLAY</div>
+            <div class="how-to-play-steps">
+                <div class="how-to-step">🎧 LISTEN to Bird's solo</div>
+                <div class="how-to-step">🎹 Use ▲▼ to match the pitch</div>
+                <div class="how-to-step">◄► to move between notes</div>
+                <div class="how-to-step">✓ CHECK when ready</div>
+            </div>
+            <button id="how-to-play-btn" class="action-btn">TAP TO START</button>
+        </div>
+    </div>
+
+    <script src="./assets/tone.min.js"></script>
+    <script src="game.js?v=2"></script>
+</body>
+</html>
