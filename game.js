@@ -558,6 +558,7 @@ function parseMusicXML(xmlDoc) {
     // Parse all notes, tracking cumulative position in divisions
     let cumulativeDiv = 0;
     const measures = xmlDoc.querySelectorAll('measure');
+    let measureIndex = 0;
     measures.forEach(measure => {
         // Check for divisions change mid-score
         const divEl = measure.querySelector('divisions');
@@ -568,10 +569,12 @@ function parseMusicXML(xmlDoc) {
             const note = parseNote(noteEl, songData.divisions);
             if (note) {
                 note.startDiv = cumulativeDiv;
+                note.measureIndex = measureIndex;
                 cumulativeDiv += note.duration;
                 songData.notes.push(note);
             }
         });
+        measureIndex++;
     });
     
     return songData;
@@ -1275,24 +1278,13 @@ function renderStaff() {
     // DRAW BARLINES (measure boundaries using proportional positions)
     // ========================================================================
     
-    const beatsPerMeasure = timeSig.beats;
-    const quarterNoteDivisions = divisions;
-    const beatType = timeSig.beatType;
-    const divisionsPerBeat = quarterNoteDivisions / (beatType / 4);
-    const divisionsPerMeasure = divisionsPerBeat * beatsPerMeasure;
-    
-    // Use absolute startDiv positions to find measure boundaries
-    // A barline goes between two adjacent notes if they're in different measures
+    // Use measureIndex from MusicXML parsing — the source of truth for measure boundaries
     fragment.forEach((note, index) => {
         if (index >= fragment.length - 1) return;
         const nextNote = fragment[index + 1];
         
-        // Which measure does each note's start fall in?
-        const thisMeasure = Math.floor(note.startDiv / divisionsPerMeasure);
-        const nextMeasure = Math.floor(nextNote.startDiv / divisionsPerMeasure);
-        
-        if (nextMeasure > thisMeasure) {
-            // Barline position: midway between this note and next
+        if (note.measureIndex != null && nextNote.measureIndex != null &&
+            nextNote.measureIndex > note.measureIndex) {
             const barlineX = (positions[index] + positions[index + 1]) / 2;
             
             svg.appendChild(createSVGElement('line', {
