@@ -13,22 +13,17 @@ function getStaffConfig() {
     const screenWidth = window.innerWidth;
     const fragmentLength = fragment.length;
     
-    // Base spacing, adjusted for fragment length and screen width
-    let noteSpacing = 70;
-    if (screenWidth < 768) {
-        // Mobile: calculate spacing to fit screen
-        const availableWidth = screenWidth - 100; // Account for margins + clef
-        const desiredSpacing = Math.floor(availableWidth / (fragmentLength + 1));
-        noteSpacing = Math.max(40, Math.min(70, desiredSpacing));
-    }
+    // ALWAYS use readable note spacing — staff scrolls horizontally if needed
+    const noteSpacing = 65;
+    const ls = screenWidth < 768 ? 18 : 18; // lineSpacing — bigger = more readable
     
     return {
         lines: 5,
-        lineSpacing: 16,
-        topLine: 70,
-        leftMargin: screenWidth < 768 ? 60 : 70,
+        lineSpacing: ls,
+        topLine: 55,
+        leftMargin: 75,
         noteSpacing: noteSpacing,
-        clefSize: screenWidth < 768 ? 70 : 80
+        clefSize: 80
     };
 }
 
@@ -986,6 +981,12 @@ function playFragmentAudio() {
         if (newIdx !== state.playbackCursorIndex && newIdx >= 0) {
             state.playbackCursorIndex = newIdx;
             updatePlayhead();
+            // Auto-scroll to playhead position
+            const container = document.querySelector('.staff-container');
+            if (container && state.notePositions && state.notePositions[newIdx] != null) {
+                const targetScroll = state.notePositions[newIdx] - container.clientWidth / 2;
+                container.scrollTo({ left: Math.max(0, targetScroll), behavior: 'smooth' });
+            }
         }
         
         // Check if we've passed the end
@@ -1100,7 +1101,7 @@ function drawRest(svg, x, topLine, lineSpacing, duration, divisions) {
         yOffset = lineSpacing * 1.5;
     }
     
-    const fontSize = 32;
+    const fontSize = 36;
     const text = createSVGElement('text', {
         x: x,
         y: topLine + yOffset + fontSize * 0.1,
@@ -1144,24 +1145,25 @@ function renderStaff() {
         layoutItems.push({ type: 'note', duration: fragment[i].duration, index: i, note: fragment[i] });
     }
     
-    // Calculate weights and positions using square root for natural spacing
-    const totalWeight = layoutItems.reduce((sum, item) => sum + Math.sqrt(item.duration), 0);
-    const screenWidth = window.innerWidth;
-    const availableWidth = (screenWidth < 768 ? screenWidth - 120 : screenWidth - 160);
+    // Fixed note spacing with proportional rest gaps — scrolls horizontally
+    const baseSpacing = noteSpacing; // from config (65px)
     let currentX = leftMargin;
     const positions = []; // X position for each note index
     
     layoutItems.forEach(item => {
-        const weight = Math.sqrt(item.duration);
-        const width = Math.max(25, (weight / totalWeight) * availableWidth);
-        
         if (item.type === 'note') {
-            positions[item.index] = currentX + width / 2;
+            positions[item.index] = currentX;
+            // Wider spacing for longer notes (subtle: half notes get 1.3x, quarters 1x, eighths 0.85x)
+            const qDur = divisions;
+            const ratio = Math.min(1.5, Math.max(0.8, Math.sqrt(item.duration / qDur)));
+            currentX += baseSpacing * ratio;
         } else {
-            // Draw rest symbol at currentX + width/2
-            drawRest(svg, currentX + width / 2, topLine, lineSpacing, item.duration, divisions);
+            // Rest gap — proportional to rest duration but capped
+            const qDur = divisions;
+            const restWidth = Math.min(baseSpacing * 1.5, Math.max(20, baseSpacing * (item.duration / qDur) * 0.6));
+            drawRest(svg, currentX + restWidth / 2, topLine, lineSpacing, item.duration, divisions);
+            currentX += restWidth;
         }
-        currentX += width;
     });
     
     // Store positions for playhead access
@@ -1171,6 +1173,9 @@ function renderStaff() {
     const staffWidth = currentX + 40;
     const staffHeight = topLine + (lines - 1) * lineSpacing + topLine;
     svg.setAttribute('viewBox', `0 0 ${staffWidth} ${staffHeight}`);
+    svg.setAttribute('width', staffWidth);
+    svg.setAttribute('height', staffHeight);
+    svg.style.minWidth = staffWidth + 'px';
     
     // ========================================================================
     // DRAW STAFF LINES
@@ -1408,7 +1413,7 @@ function renderStaff() {
             const preferSharps = state.submitted ? undefined : true;
             const accStr = getAccidental(midi, preferSharps);
             const acc = (accStr.includes('#') || accStr.includes('♯')) ? SMUFL.accidentalSharp : SMUFL.accidentalFlat;
-            const fontSize = 32;
+            const fontSize = 36;
             const accEl = createSVGElement('text', {
                 x: x - 14,
                 y: y + fontSize * 0.12,
@@ -1570,7 +1575,7 @@ function drawNotehead(svg, x, y, type, className) {
                  className.includes('selected') ? 'var(--selected)' : 'var(--fg)';
     
     // Font size tuned for lineSpacing = 16
-    const fontSize = 32;
+    const fontSize = 36;
     const text = createSVGElement('text', {
         x: x,
         y: y + fontSize * 0.12, // baseline adjustment for SMuFL noteheads
@@ -1606,7 +1611,7 @@ function drawFlag(svg, x, y, stemUp, count) {
     else if (count === 2) glyph = stemUp ? SMUFL.flag16thUp : SMUFL.flag16thDown;
     
     if (glyph) {
-        const fontSize = 32;
+        const fontSize = 36;
         const text = createSVGElement('text', {
             x: stemX,
             y: tipY + (stemUp ? fontSize * 0.1 : fontSize * 0.05),
@@ -1823,6 +1828,12 @@ function loadFragment(index) {
     
     // Render staff
     renderStaff();
+    
+    // Scroll staff to beginning so clef/time sig are visible
+    requestAnimationFrame(() => {
+        const staffContainer = document.querySelector('.staff-container');
+        if (staffContainer) staffContainer.scrollLeft = 0;
+    });
 }
 
 function updateGameHeader() {
@@ -1856,6 +1867,18 @@ function moveNote(direction) {
     }
     
     renderStaff();
+    scrollToSelectedNote();
+}
+
+function scrollToSelectedNote() {
+    if (!state.notePositions) return;
+    const container = document.querySelector('.staff-container');
+    if (!container) return;
+    const x = state.notePositions[state.selectedNoteIndex];
+    if (x == null) return;
+    // Scroll so the selected note is roughly centered
+    const targetScroll = x - container.clientWidth / 2;
+    container.scrollTo({ left: Math.max(0, targetScroll), behavior: 'smooth' });
 }
 
 function adjustPitch(semitones) {
