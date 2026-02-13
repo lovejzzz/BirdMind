@@ -1281,13 +1281,17 @@ function renderStaff() {
     const divisionsPerBeat = quarterNoteDivisions / (beatType / 4);
     const divisionsPerMeasure = divisionsPerBeat * beatsPerMeasure;
     
-    let cumulativeDivisions = 0;
-    
+    // Use absolute startDiv positions to find measure boundaries
+    // A barline goes between two adjacent notes if they're in different measures
     fragment.forEach((note, index) => {
-        cumulativeDivisions += note.duration;
+        if (index >= fragment.length - 1) return;
+        const nextNote = fragment[index + 1];
         
-        // Check if we've crossed a measure boundary
-        if (cumulativeDivisions >= divisionsPerMeasure && index < fragment.length - 1) {
+        // Which measure does each note's start fall in?
+        const thisMeasure = Math.floor(note.startDiv / divisionsPerMeasure);
+        const nextMeasure = Math.floor(nextNote.startDiv / divisionsPerMeasure);
+        
+        if (nextMeasure > thisMeasure) {
             // Barline position: midway between this note and next
             const barlineX = (positions[index] + positions[index + 1]) / 2;
             
@@ -1299,8 +1303,6 @@ function renderStaff() {
                 stroke: 'var(--fg)',
                 'stroke-width': 2
             }));
-            
-            cumulativeDivisions = cumulativeDivisions % divisionsPerMeasure;
         }
     });
     
