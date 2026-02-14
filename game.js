@@ -601,6 +601,9 @@ function parseNote(noteEl, divisions) {
     const typeEl = noteEl.querySelector('type');
     if (typeEl) note.type = typeEl.textContent;
     
+    // Check for dot
+    note.dotted = noteEl.querySelector('dot') !== null;
+    
     // Get pitch (if not a rest)
     if (!note.isRest) {
         const pitchEl = noteEl.querySelector('pitch');
@@ -1150,12 +1153,7 @@ function renderStaff() {
         return map[type] || 'q';
     }
     
-    // Check if note is dotted
-    function isDotted(duration, divisions) {
-        const quarterNote = divisions;
-        return Math.abs(duration - quarterNote * 1.5) < 10 || 
-               Math.abs(duration - quarterNote * 0.75) < 5;
-    }
+    // Note: dotted info now comes from MusicXML <dot/> element (note.dotted)
     
     // Create VexFlow renderer
     const VF = Vex.Flow;
@@ -1215,8 +1213,8 @@ function renderStaff() {
             duration: vexDuration
         });
         
-        // Add dot if needed
-        if (isDotted(note.duration, divisions)) {
+        // Add dot if needed (from MusicXML <dot/> element)
+        if (note.dotted) {
             Vex.Flow.Dot.buildAndAttach([staveNote]);
         }
         
