@@ -350,10 +350,12 @@ async function initializePiano() {
         'A': [0, 1, 2, 3, 4, 5, 6, 7]
     };
     
+    const noteToTone = { 'C': 'C', 'Ds': 'D#', 'Fs': 'F#', 'A': 'A' };
     notes.forEach(note => {
         octaves[note].forEach(octave => {
-            const noteName = note + octave;
-            samples[noteName] = `./assets/salamander/${noteName}.mp3`;
+            const toneName = noteToTone[note] + octave;
+            const fileName = note + octave;
+            samples[toneName] = `./assets/salamander/${fileName}.mp3`;
         });
     });
     
