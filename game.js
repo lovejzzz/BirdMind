@@ -1157,128 +1157,184 @@ function renderStaff() {
     
     // Create VexFlow renderer
     const VF = Vex.Flow;
-    const renderer = new VF.Renderer(svg, VF.Renderer.Backends.SVG);
-    
-    // Calculate staff width based on fragment length
     const scaleFactor = 1.8;
-    const noteSpacing = 65;
-    const leftMargin = 80;
-    let estimatedWidth = leftMargin + fragment.length * noteSpacing + 100;
     
-    renderer.resize(estimatedWidth * scaleFactor, 200 * scaleFactor);
+    // Group notes by measure
+    const measureGroups = new Map();
+    for (let i = 0; i < fragment.length; i++) {
+        const measureIndex = fragment[i].measureIndex || 0;
+        if (!measureGroups.has(measureIndex)) {
+            measureGroups.set(measureIndex, []);
+        }
+        measureGroups.get(measureIndex).push({ note: fragment[i], fragmentIndex: i });
+    }
+    
+    const measures = Array.from(measureGroups.keys()).sort((a, b) => a - b);
+    
+    // Calculate total width needed
+    const measureWidth = 250; // base width per measure
+    const totalWidth = measures.length * measureWidth + 100;
+    
+    const renderer = new VF.Renderer(svg, VF.Renderer.Backends.SVG);
+    renderer.resize(totalWidth * scaleFactor, 200 * scaleFactor);
     const context = renderer.getContext();
     context.scale(scaleFactor, scaleFactor);
     
-    // Create stave with clef and time signature
-    const stave = new VF.Stave(10, 40, estimatedWidth - 40);
-    stave.addClef('treble');
-    stave.addTimeSignature(`${timeSig.beats}/${timeSig.beatType}`);
-    
-    // Add key signature if present
-    if (keySig.fifths !== 0) {
-        const keyMap = {
-            '-7': 'Cb', '-6': 'Gb', '-5': 'Db', '-4': 'Ab', '-3': 'Eb', '-2': 'Bb', '-1': 'F',
-            '0': 'C', '1': 'G', '2': 'D', '3': 'A', '4': 'E', '5': 'B', '6': 'F#', '7': 'C#'
-        };
-        const keyName = keyMap[keySig.fifths.toString()] || 'C';
-        stave.addKeySignature(keyName);
-    }
-    
-    stave.setContext(context).draw();
-    
-    // Build layout items (notes + rests for gaps)
+    // Track all layout items for theme coloring
     const layoutItems = [];
-    const noteIndices = []; // Track which layoutItem corresponds to which fragment index
+    let currentX = 10;
+    const staveY = 40;
+    const staveHeight = 100;
     
-    for (let i = 0; i < fragment.length; i++) {
-        // Check for gap before this note
-        if (i > 0) {
-            const prevEnd = fragment[i-1].startDiv + fragment[i-1].duration;
-            const gap = fragment[i].startDiv - prevEnd;
-            if (gap > 0) {
-                // Add rest for gap
-                const restType = gap >= divisions ? 'qr' : gap >= divisions/2 ? '8r' : '16r';
-                layoutItems.push({ type: 'rest', duration: restType, fragmentIndex: -1 });
+    // Process each measure
+    measures.forEach((measureIndex, measureNum) => {
+        const measureNotes = measureGroups.get(measureIndex);
+        
+        // Create stave for this measure
+        const stave = new VF.Stave(currentX, staveY, measureWidth);
+        
+        // First measure gets clef, time sig, key sig
+        if (measureNum === 0) {
+            stave.addClef('treble');
+            stave.addTimeSignature(`${timeSig.beats}/${timeSig.beatType}`);
+            
+            if (keySig.fifths !== 0) {
+                const keyMap = {
+                    '-7': 'Cb', '-6': 'Gb', '-5': 'Db', '-4': 'Ab', '-3': 'Eb', '-2': 'Bb', '-1': 'F',
+                    '0': 'C', '1': 'G', '2': 'D', '3': 'A', '4': 'E', '5': 'B', '6': 'F#', '7': 'C#'
+                };
+                const keyName = keyMap[keySig.fifths.toString()] || 'C';
+                stave.addKeySignature(keyName);
             }
         }
         
-        const note = fragment[i];
-        const userMidi = state.userPitches[i];
+        stave.setContext(context).draw();
         
-        // Rhythm mode: always use b/4 unless submitted or showing answer
-        const showRealPitch = state.submitted || state.showingAnswer;
-        const vexKey = showRealPitch ? midiToVexKey(userMidi) : 'b/4';
-        const vexDuration = typeToVexDuration(note.type);
+        // Build notes and rests for this measure
+        const measureLayoutItems = [];
         
-        const staveNote = new VF.StaveNote({
-            keys: [vexKey],
-            duration: vexDuration
+        for (let i = 0; i < measureNotes.length; i++) {
+            const { note, fragmentIndex } = measureNotes[i];
+            
+            // Check for gap before this note (within same measure)
+            if (i > 0) {
+                const prevNote = measureNotes[i - 1].note;
+                const prevEnd = prevNote.startDiv + prevNote.duration;
+                const gap = note.startDiv - prevEnd;
+                if (gap > 0) {
+                    // Add rest for gap
+                    const restType = gap >= divisions ? 'qr' : gap >= divisions/2 ? '8r' : '16r';
+                    measureLayoutItems.push({ 
+                        type: 'rest', 
+                        duration: restType, 
+                        fragmentIndex: -1,
+                        vexNote: new VF.StaveNote({ keys: ['b/4'], duration: restType })
+                    });
+                }
+            }
+            
+            const userMidi = state.userPitches[fragmentIndex];
+            
+            // Rhythm mode: always use b/4 unless submitted or showing answer
+            const showRealPitch = state.submitted || state.showingAnswer;
+            const vexKey = showRealPitch ? midiToVexKey(userMidi) : 'b/4';
+            const vexDuration = typeToVexDuration(note.type);
+            
+            const staveNote = new VF.StaveNote({
+                keys: [vexKey],
+                duration: vexDuration
+            });
+            
+            // Add dot if needed (from MusicXML <dot/> element)
+            if (note.dotted) {
+                Vex.Flow.Dot.buildAndAttach([staveNote]);
+            }
+            
+            // Add accidental if needed (only in answer mode)
+            if (showRealPitch && needsAccidental(userMidi)) {
+                const midi = userMidi % 12;
+                const accidental = [1, 3, 6, 8, 10].includes(midi) ? '#' : null;
+                if (accidental) {
+                    staveNote.addModifier(new VF.Accidental(accidental), 0);
+                }
+            }
+            
+            measureLayoutItems.push({ 
+                type: 'note', 
+                vexNote: staveNote, 
+                fragmentIndex: fragmentIndex 
+            });
+        }
+        
+        // Create voice for this measure
+        const notes = measureLayoutItems.map(item => item.vexNote);
+        const voice = new VF.Voice({ num_beats: timeSig.beats * 4, beat_value: timeSig.beatType });
+        voice.setStrict(false);
+        voice.addTickables(notes);
+        
+        // Create beams for this measure BEFORE drawing
+        const beams = VF.Beam.generateBeams(notes.filter(n => n.duration !== 'wr' && n.duration !== 'hr' && n.duration !== 'qr'), {
+            beam_rests: false,
+            maintain_stem_directions: false
         });
         
-        // Add dot if needed (from MusicXML <dot/> element)
-        if (note.dotted) {
-            Vex.Flow.Dot.buildAndAttach([staveNote]);
-        }
+        // Format and draw this measure
+        const formatter = new VF.Formatter();
+        const staveWidth = stave.getWidth() - stave.getModifierXShift();
+        formatter.joinVoices([voice]).format([voice], staveWidth);
+        voice.draw(context, stave);
+        beams.forEach(beam => beam.setContext(context).draw());
         
-        // Add accidental if needed (only in answer mode)
-        if (showRealPitch && needsAccidental(userMidi)) {
-            const midi = userMidi % 12;
-            const accidental = [1, 3, 6, 8, 10].includes(midi) ? '#' : null;
-            if (accidental) {
-                staveNote.addModifier(new VF.Accidental(accidental), 0);
-            }
-        }
+        // Store layout items with their positions
+        layoutItems.push(...measureLayoutItems);
         
-        layoutItems.push({ type: 'note', vexNote: staveNote, fragmentIndex: i });
-        noteIndices.push(i);
-    }
-    
-    // Create voices and format
-    const notes = layoutItems.map(item => item.type === 'rest' ? 
-        new VF.StaveNote({ keys: ['b/4'], duration: item.duration }) : item.vexNote);
-    
-    const voice = new VF.Voice({ num_beats: timeSig.beats * 4, beat_value: timeSig.beatType });
-    voice.setStrict(false);
-    voice.addTickables(notes);
-    
-    // Create beams BEFORE drawing (so VexFlow suppresses individual flags)
-    const beams = VF.Beam.generateBeams(notes, {
-        beam_rests: false,
-        maintain_stem_directions: false
+        // Move X for next measure
+        currentX += measureWidth;
     });
-    
-    // Format and draw
-    const formatter = new VF.Formatter();
-    const staveWidth = stave.getWidth() - stave.getModifierXShift();
-    formatter.joinVoices([voice]).format([voice], staveWidth);
-    voice.draw(context, stave);
-    beams.forEach(beam => beam.setContext(context).draw());
     
     // Extract note positions for playhead
     state.notePositions = [];
-    let noteCounter = 0;
     
-    layoutItems.forEach((item, i) => {
-        if (item.type === 'note') {
-            const vexNote = notes[i];
-            const x = vexNote.getAbsoluteX() * scaleFactor;
-            state.notePositions[item.fragmentIndex] = x;
-        }
-    });
+    // Get all rendered VexFlow notes from the DOM to extract positions
+    setTimeout(() => {
+        const svgElement = svg.querySelector('svg');
+        if (!svgElement) return;
+        
+        const staveNotes = svgElement.querySelectorAll('.vf-stavenote');
+        let noteIndex = 0;
+        
+        layoutItems.forEach((item, i) => {
+            if (item.type === 'note' && noteIndex < staveNotes.length) {
+                // Find the corresponding DOM element
+                let domIndex = 0;
+                for (let j = 0; j <= i; j++) {
+                    if (layoutItems[j].type === 'note' || layoutItems[j].type === 'rest') {
+                        if (j === i) break;
+                        domIndex++;
+                    }
+                }
+                
+                if (domIndex < staveNotes.length) {
+                    const noteGroup = staveNotes[domIndex];
+                    const bbox = noteGroup.getBBox();
+                    state.notePositions[item.fragmentIndex] = bbox.x * scaleFactor;
+                }
+                noteIndex++;
+            }
+        });
+    }, 5);
     
     // Apply Flipper Zero theme colors
     setTimeout(() => {
         const svgElement = svg.querySelector('svg');
         if (!svgElement) return;
         
-        // Force all VexFlow elements to orange via inline styles on the SVG root
-        // VexFlow uses CSS fill/stroke on <g> elements, not SVG attributes
+        // Force all VexFlow elements to orange via inline styles
         svgElement.style.setProperty('--vf-color', '#FF8C00');
         
         // Override all fills and strokes globally
         svgElement.querySelectorAll('g, path, line, rect, text').forEach(el => {
             const computedFill = getComputedStyle(el).fill;
-            // Change black fills to orange (but preserve 'none')
             if (computedFill && computedFill !== 'none' && computedFill !== 'rgba(0, 0, 0, 0)') {
                 el.style.fill = '#FF8C00';
             }
@@ -1327,7 +1383,7 @@ function renderStaff() {
         
         // Adjust SVG dimensions for horizontal scroll
         const bbox = svgElement.getBBox();
-        const finalWidth = Math.max(estimatedWidth, bbox.width + 40);
+        const finalWidth = Math.max(totalWidth, bbox.width + 40);
         svgElement.setAttribute('width', finalWidth);
         svgElement.setAttribute('viewBox', `0 0 ${finalWidth} 200`);
         svg.style.minWidth = finalWidth + 'px';
