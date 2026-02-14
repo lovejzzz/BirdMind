@@ -1275,6 +1275,13 @@ function renderStaff() {
     const container = document.getElementById('staff-svg');
     container.innerHTML = '';
     
+    // OSMD needs a visible container with width > 0
+    // If container has no width yet (screen not shown), defer rendering
+    if (container.clientWidth === 0) {
+        setTimeout(() => renderStaff(), 500);
+        return;
+    }
+    
     const fragment = state.currentFragment;
     if (!fragment || fragment.length === 0) return;
     
