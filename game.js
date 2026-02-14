@@ -1289,44 +1289,47 @@ function renderStaff() {
         const svgElement = svg.querySelector('svg');
         if (!svgElement) return;
         
-        // Change all paths, lines, and rects to orange by default
-        svgElement.querySelectorAll('path, line, rect').forEach(el => {
-            if (el.getAttribute('fill') && el.getAttribute('fill') !== 'none') {
-                el.setAttribute('fill', '#FF8C00');
+        // Force all VexFlow elements to orange via inline styles on the SVG root
+        // VexFlow uses CSS fill/stroke on <g> elements, not SVG attributes
+        svgElement.style.setProperty('--vf-color', '#FF8C00');
+        
+        // Override all fills and strokes globally
+        svgElement.querySelectorAll('g, path, line, rect, text').forEach(el => {
+            const computedFill = getComputedStyle(el).fill;
+            // Change black fills to orange (but preserve 'none')
+            if (computedFill && computedFill !== 'none' && computedFill !== 'rgba(0, 0, 0, 0)') {
+                el.style.fill = '#FF8C00';
             }
-            if (el.getAttribute('stroke')) {
-                el.setAttribute('stroke', '#FF8C00');
+            const computedStroke = getComputedStyle(el).stroke;
+            if (computedStroke && computedStroke !== 'none' && computedStroke !== 'rgba(0, 0, 0, 0)') {
+                el.style.stroke = '#FF8C00';
             }
         });
         
-        // Color code notes based on state
-        const noteElements = svgElement.querySelectorAll('.vf-notehead');
-        noteElements.forEach((el, i) => {
-            if (i < fragment.length) {
-                const userMidi = state.userPitches[i];
-                const correctMidi = fragment[i].midi;
-                const isSelected = i === state.selectedNoteIndex;
-                const isCorrect = userMidi === correctMidi;
-                
-                let color = '#FF8C00'; // default orange
-                
-                if (state.submitted) {
-                    color = isCorrect ? '#00FF00' : '#FF4444';
-                } else if (isSelected) {
-                    color = '#FFFFFF';
-                }
-                
-                // Apply color to notehead and related elements
-                const parent = el.parentElement;
-                parent.querySelectorAll('path, circle, rect, line').forEach(child => {
-                    if (child.getAttribute('fill') && child.getAttribute('fill') !== 'none') {
-                        child.setAttribute('fill', color);
-                    }
-                    if (child.getAttribute('stroke')) {
-                        child.setAttribute('stroke', color);
-                    }
-                });
+        // Color code individual notes based on game state
+        const staveNotes = svgElement.querySelectorAll('.vf-stavenote');
+        staveNotes.forEach((noteGroup, i) => {
+            // Skip rest notes (they don't correspond to fragment notes)
+            if (noteGroup.querySelector('.vf-notehead') === null) return;
+            
+            // Find which fragment index this note corresponds to
+            const fragIdx = layoutItems[i]?.fragmentIndex;
+            if (fragIdx === undefined || fragIdx < 0) return;
+            
+            const isSelected = fragIdx === state.selectedNoteIndex;
+            const isCorrect = state.userPitches[fragIdx] === fragment[fragIdx].midi;
+            
+            let color = '#FF8C00'; // default orange
+            if (state.submitted) {
+                color = isCorrect ? '#00FF00' : '#FF4444';
+            } else if (isSelected) {
+                color = '#FFFFFF';
             }
+            
+            noteGroup.querySelectorAll('path, line, rect, text').forEach(child => {
+                child.style.fill = color;
+                child.style.stroke = color;
+            });
         });
         
         // Draw selected note indicator if not submitted
