@@ -495,6 +495,10 @@ async function loadSongXML(song) {
             throw new Error('XML parsing failed');
         }
         
+        // Store raw XML and parsed doc for OSMD
+        state.rawXML = xmlText;
+        state.xmlDoc = xmlDoc;
+        
         const songData = parseMusicXML(xmlDoc);
         if (!songData || !songData.notes || songData.notes.length === 0) {
             throw new Error('No valid notes found in score');
@@ -1120,11 +1124,156 @@ function drawRest(svg, x, topLine, lineSpacing, duration, divisions) {
     svg.appendChild(text);
 }
 
-// VexFlow-based renderStaff replacement for Charlie Parker's Mind
+// ============================================================================
+// OSMD FRAGMENT XML BUILDER
+// ============================================================================
+
+function buildFragmentXML(fragment, xmlDoc, timeSig, keySig, divisions) {
+    if (!fragment || fragment.length === 0 || !xmlDoc) {
+        return null;
+    }
+    
+    // Get unique measure indices from fragment
+    const measureIndices = [...new Set(fragment.map(n => n.measureIndex || 0))];
+    measureIndices.sort((a, b) => a - b);
+    
+    // Clone the measures we need
+    const allMeasures = xmlDoc.querySelectorAll('measure');
+    const fragmentMeasures = measureIndices.map(idx => {
+        if (idx < allMeasures.length) {
+            return allMeasures[idx].cloneNode(true);
+        }
+        return null;
+    }).filter(m => m !== null);
+    
+    if (fragmentMeasures.length === 0) {
+        return null;
+    }
+    
+    // Build minimal MusicXML document
+    const showRealPitch = state.submitted || state.showingAnswer;
+    
+    // If rhythm mode (not showing answer), blank all pitches to B4
+    if (!showRealPitch) {
+        fragmentMeasures.forEach(measure => {
+            const notes = measure.querySelectorAll('note');
+            notes.forEach(noteEl => {
+                const pitchEl = noteEl.querySelector('pitch');
+                if (pitchEl) {
+                    // Replace with B4
+                    pitchEl.innerHTML = '<step>B</step><octave>4</octave>';
+                }
+            });
+        });
+    } else {
+        // In answer mode, replace with user pitches
+        let noteIndex = 0;
+        fragmentMeasures.forEach(measure => {
+            const notes = measure.querySelectorAll('note');
+            notes.forEach(noteEl => {
+                const pitchEl = noteEl.querySelector('pitch');
+                if (pitchEl && noteIndex < state.userPitches.length) {
+                    const userMidi = state.userPitches[noteIndex];
+                    const octave = Math.floor(userMidi / 12) - 1;
+                    const pitchClass = userMidi % 12;
+                    const stepMap = ['C', 'C', 'D', 'D', 'E', 'F', 'F', 'G', 'G', 'A', 'A', 'B'];
+                    const alterMap = [0, 1, 0, 1, 0, 0, 1, 0, 1, 0, 1, 0];
+                    const step = stepMap[pitchClass];
+                    const alter = alterMap[pitchClass];
+                    
+                    let pitchHTML = `<step>${step}</step><octave>${octave}</octave>`;
+                    if (alter !== 0) {
+                        pitchHTML += `<alter>${alter}</alter>`;
+                    }
+                    pitchEl.innerHTML = pitchHTML;
+                    noteIndex++;
+                }
+            });
+        });
+    }
+    
+    // Ensure first measure has attributes (divisions, key, time, clef)
+    const firstMeasure = fragmentMeasures[0];
+    let attributesEl = firstMeasure.querySelector('attributes');
+    if (!attributesEl) {
+        attributesEl = xmlDoc.createElementNS(null, 'attributes');
+        firstMeasure.insertBefore(attributesEl, firstMeasure.firstChild);
+    }
+    
+    // Ensure divisions
+    let divisionsEl = attributesEl.querySelector('divisions');
+    if (!divisionsEl) {
+        divisionsEl = xmlDoc.createElementNS(null, 'divisions');
+        divisionsEl.textContent = divisions.toString();
+        attributesEl.appendChild(divisionsEl);
+    }
+    
+    // Ensure key signature
+    let keyEl = attributesEl.querySelector('key');
+    if (!keyEl && keySig) {
+        keyEl = xmlDoc.createElementNS(null, 'key');
+        const fifthsEl = xmlDoc.createElementNS(null, 'fifths');
+        fifthsEl.textContent = (keySig.fifths || 0).toString();
+        keyEl.appendChild(fifthsEl);
+        attributesEl.appendChild(keyEl);
+    }
+    
+    // Ensure time signature
+    let timeEl = attributesEl.querySelector('time');
+    if (!timeEl && timeSig) {
+        timeEl = xmlDoc.createElementNS(null, 'time');
+        const beatsEl = xmlDoc.createElementNS(null, 'beats');
+        beatsEl.textContent = (timeSig.beats || 4).toString();
+        const beatTypeEl = xmlDoc.createElementNS(null, 'beat-type');
+        beatTypeEl.textContent = (timeSig.beatType || 4).toString();
+        timeEl.appendChild(beatsEl);
+        timeEl.appendChild(beatTypeEl);
+        attributesEl.appendChild(timeEl);
+    }
+    
+    // Ensure clef
+    let clefEl = attributesEl.querySelector('clef');
+    if (!clefEl) {
+        clefEl = xmlDoc.createElementNS(null, 'clef');
+        const signEl = xmlDoc.createElementNS(null, 'sign');
+        signEl.textContent = 'G';
+        const lineEl = xmlDoc.createElementNS(null, 'line');
+        lineEl.textContent = '2';
+        clefEl.appendChild(signEl);
+        clefEl.appendChild(lineEl);
+        attributesEl.appendChild(clefEl);
+    }
+    
+    // Build minimal MusicXML structure
+    const xmlString = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE score-partwise PUBLIC "-//Recordare//DTD MusicXML 3.1 Partwise//EN" "http://www.musicxml.org/dtds/partwise.dtd">
+<score-partwise version="3.1">
+  <part-list>
+    <score-part id="P1">
+      <part-name>Fragment</part-name>
+    </score-part>
+  </part-list>
+  <part id="P1">
+    ${fragmentMeasures.map((m, i) => {
+        const serializer = new XMLSerializer();
+        let measureXML = serializer.serializeToString(m);
+        // Fix measure number
+        measureXML = measureXML.replace(/number="\d+"/, `number="${i + 1}"`);
+        return measureXML;
+    }).join('\n')}
+  </part>
+</score-partwise>`;
+    
+    return xmlString;
+}
+
+// ============================================================================
+// OSMD STAFF RENDERING
+// ============================================================================
 
 function renderStaff() {
-    const svg = document.getElementById('staff-svg');
-    svg.innerHTML = '';
+    const container = document.getElementById('staff-svg');
+    container.innerHTML = '';
     
     const fragment = state.currentFragment;
     if (!fragment || fragment.length === 0) return;
@@ -1132,230 +1281,78 @@ function renderStaff() {
     const divisions = state.currentSongData?.divisions || 120;
     const timeSig = state.currentSongData?.timeSignature || { beats: 4, beatType: 4 };
     const keySig = state.currentSongData?.keySignature || { fifths: 0 };
+    const xmlDoc = state.xmlDoc;
     
-    // MIDI to VexFlow key converter
-    function midiToVexKey(midi) {
-        const noteNames = ['c', 'c#', 'd', 'd#', 'e', 'f', 'f#', 'g', 'g#', 'a', 'a#', 'b'];
-        const noteName = noteNames[midi % 12];
-        const octave = Math.floor(midi / 12) - 1;
-        return noteName + '/' + octave;
+    if (!xmlDoc) {
+        console.error('No XML document available for OSMD rendering');
+        return;
     }
     
-    // Duration type mapping
-    function typeToVexDuration(type) {
-        const map = {
-            'whole': 'w',
-            'half': 'h',
-            'quarter': 'q',
-            'eighth': '8',
-            '16th': '16'
-        };
-        return map[type] || 'q';
+    // Build fragment XML
+    const fragmentXML = buildFragmentXML(fragment, xmlDoc, timeSig, keySig, divisions);
+    if (!fragmentXML) {
+        console.error('Failed to build fragment XML');
+        return;
     }
     
-    // Note: dotted info now comes from MusicXML <dot/> element (note.dotted)
-    
-    // Create VexFlow renderer
-    const VF = Vex.Flow;
-    const scaleFactor = 1.8;
-    
-    // Group notes by measure
-    const measureGroups = new Map();
-    for (let i = 0; i < fragment.length; i++) {
-        const measureIndex = fragment[i].measureIndex || 0;
-        if (!measureGroups.has(measureIndex)) {
-            measureGroups.set(measureIndex, []);
-        }
-        measureGroups.get(measureIndex).push({ note: fragment[i], fragmentIndex: i });
-    }
-    
-    const measures = Array.from(measureGroups.keys()).sort((a, b) => a - b);
-    
-    // Calculate total width needed
-    const measureWidth = 250; // base width per measure
-    const totalWidth = measures.length * measureWidth + 100;
-    
-    const renderer = new VF.Renderer(svg, VF.Renderer.Backends.SVG);
-    renderer.resize(totalWidth * scaleFactor, 200 * scaleFactor);
-    const context = renderer.getContext();
-    context.scale(scaleFactor, scaleFactor);
-    
-    // Track all layout items for theme coloring
-    const layoutItems = [];
-    let currentX = 10;
-    const staveY = 40;
-    const staveHeight = 100;
-    
-    // Process each measure
-    measures.forEach((measureIndex, measureNum) => {
-        const measureNotes = measureGroups.get(measureIndex);
-        
-        // Create stave for this measure
-        const stave = new VF.Stave(currentX, staveY, measureWidth);
-        
-        // First measure gets clef, time sig, key sig
-        if (measureNum === 0) {
-            stave.addClef('treble');
-            stave.addTimeSignature(`${timeSig.beats}/${timeSig.beatType}`);
-            
-            if (keySig.fifths !== 0) {
-                const keyMap = {
-                    '-7': 'Cb', '-6': 'Gb', '-5': 'Db', '-4': 'Ab', '-3': 'Eb', '-2': 'Bb', '-1': 'F',
-                    '0': 'C', '1': 'G', '2': 'D', '3': 'A', '4': 'E', '5': 'B', '6': 'F#', '7': 'C#'
-                };
-                const keyName = keyMap[keySig.fifths.toString()] || 'C';
-                stave.addKeySignature(keyName);
-            }
-        }
-        
-        stave.setContext(context).draw();
-        
-        // Build notes and rests for this measure
-        const measureLayoutItems = [];
-        
-        for (let i = 0; i < measureNotes.length; i++) {
-            const { note, fragmentIndex } = measureNotes[i];
-            
-            // Check for gap before this note (within same measure)
-            if (i > 0) {
-                const prevNote = measureNotes[i - 1].note;
-                const prevEnd = prevNote.startDiv + prevNote.duration;
-                const gap = note.startDiv - prevEnd;
-                if (gap > 0) {
-                    // Add rest for gap
-                    const restType = gap >= divisions ? 'qr' : gap >= divisions/2 ? '8r' : '16r';
-                    measureLayoutItems.push({ 
-                        type: 'rest', 
-                        duration: restType, 
-                        fragmentIndex: -1,
-                        vexNote: new VF.StaveNote({ keys: ['b/4'], duration: restType })
-                    });
-                }
-            }
-            
-            const userMidi = state.userPitches[fragmentIndex];
-            
-            // Rhythm mode: always use b/4 unless submitted or showing answer
-            const showRealPitch = state.submitted || state.showingAnswer;
-            const vexKey = showRealPitch ? midiToVexKey(userMidi) : 'b/4';
-            const vexDuration = typeToVexDuration(note.type);
-            
-            const staveNote = new VF.StaveNote({
-                keys: [vexKey],
-                duration: vexDuration
-            });
-            
-            // Add dot if needed (from MusicXML <dot/> element)
-            if (note.dotted) {
-                Vex.Flow.Dot.buildAndAttach([staveNote]);
-            }
-            
-            // Add accidental if needed (only in answer mode)
-            if (showRealPitch && needsAccidental(userMidi)) {
-                const midi = userMidi % 12;
-                const accidental = [1, 3, 6, 8, 10].includes(midi) ? '#' : null;
-                if (accidental) {
-                    staveNote.addModifier(new VF.Accidental(accidental), 0);
-                }
-            }
-            
-            measureLayoutItems.push({ 
-                type: 'note', 
-                vexNote: staveNote, 
-                fragmentIndex: fragmentIndex 
-            });
-        }
-        
-        // Create voice for this measure
-        const notes = measureLayoutItems.map(item => item.vexNote);
-        const voice = new VF.Voice({ num_beats: timeSig.beats * 4, beat_value: timeSig.beatType });
-        voice.setStrict(false);
-        voice.addTickables(notes);
-        
-        // Create beams for this measure BEFORE drawing
-        const beams = VF.Beam.generateBeams(notes.filter(n => n.duration !== 'wr' && n.duration !== 'hr' && n.duration !== 'qr'), {
-            beam_rests: false,
-            maintain_stem_directions: false
-        });
-        
-        // Format and draw this measure
-        const formatter = new VF.Formatter();
-        const staveWidth = stave.getWidth() - stave.getModifierXShift();
-        formatter.joinVoices([voice]).format([voice], staveWidth);
-        voice.draw(context, stave);
-        beams.forEach(beam => beam.setContext(context).draw());
-        
-        // Store layout items with their positions
-        layoutItems.push(...measureLayoutItems);
-        
-        // Move X for next measure
-        currentX += measureWidth;
+    // Create OSMD instance
+    const osmd = new opensheetmusicdisplay.OpenSheetMusicDisplay(container, {
+        backend: "svg",
+        drawTitle: false,
+        drawSubtitle: false,
+        drawComposer: false,
+        drawCredits: false,
+        drawPartNames: false,
+        drawPartAbbreviations: false,
+        drawMeasureNumbers: false,
+        autoResize: false
     });
     
-    // Extract note positions for playhead
-    state.notePositions = [];
+    // Load and render
+    osmd.load(fragmentXML).then(() => {
+        osmd.render();
+        
+        // Post-process: apply orange theme and extract note positions
+        setTimeout(() => {
+            applyOrangeTheme();
+            colorNotesBasedOnGameState();
+            extractNotePositions();
+            updateIntervalDisplay();
+        }, 50);
+    }).catch(err => {
+        console.error('OSMD rendering error:', err);
+    });
     
-    // Get all rendered VexFlow notes from the DOM to extract positions
-    setTimeout(() => {
-        const svgElement = svg.querySelector('svg');
-        if (!svgElement) return;
+    function applyOrangeTheme() {
+        const svg = container.querySelector('svg');
+        if (!svg) return;
         
-        const staveNotes = svgElement.querySelectorAll('.vf-stavenote');
-        let noteIndex = 0;
-        
-        layoutItems.forEach((item, i) => {
-            if (item.type === 'note' && noteIndex < staveNotes.length) {
-                // Find the corresponding DOM element
-                let domIndex = 0;
-                for (let j = 0; j <= i; j++) {
-                    if (layoutItems[j].type === 'note' || layoutItems[j].type === 'rest') {
-                        if (j === i) break;
-                        domIndex++;
-                    }
-                }
-                
-                if (domIndex < staveNotes.length) {
-                    const noteGroup = staveNotes[domIndex];
-                    const bbox = noteGroup.getBBox();
-                    state.notePositions[item.fragmentIndex] = bbox.x * scaleFactor;
-                }
-                noteIndex++;
-            }
-        });
-    }, 5);
-    
-    // Apply Flipper Zero theme colors
-    setTimeout(() => {
-        const svgElement = svg.querySelector('svg');
-        if (!svgElement) return;
-        
-        // Force all VexFlow elements to orange via inline styles
-        svgElement.style.setProperty('--vf-color', '#FF8C00');
-        
-        // Override all fills and strokes globally
-        svgElement.querySelectorAll('g, path, line, rect, text').forEach(el => {
-            const computedFill = getComputedStyle(el).fill;
-            if (computedFill && computedFill !== 'none' && computedFill !== 'rgba(0, 0, 0, 0)') {
+        // Set all strokes and fills to orange
+        svg.querySelectorAll('path, line, rect, text, ellipse, circle').forEach(el => {
+            const fill = el.getAttribute('fill');
+            const stroke = el.getAttribute('stroke');
+            
+            if (fill && fill !== 'none' && fill !== 'transparent') {
                 el.style.fill = '#FF8C00';
             }
-            const computedStroke = getComputedStyle(el).stroke;
-            if (computedStroke && computedStroke !== 'none' && computedStroke !== 'rgba(0, 0, 0, 0)') {
+            if (stroke && stroke !== 'none' && stroke !== 'transparent') {
                 el.style.stroke = '#FF8C00';
             }
         });
+    }
+    
+    function colorNotesBasedOnGameState() {
+        const svg = container.querySelector('svg');
+        if (!svg) return;
         
-        // Color code individual notes based on game state
-        const staveNotes = svgElement.querySelectorAll('.vf-stavenote');
-        staveNotes.forEach((noteGroup, i) => {
-            // Skip rest notes (they don't correspond to fragment notes)
-            if (noteGroup.querySelector('.vf-notehead') === null) return;
+        // Find all note heads (OSMD/VexFlow uses vf-notehead class)
+        const noteheads = svg.querySelectorAll('.vf-notehead');
+        
+        noteheads.forEach((notehead, i) => {
+            if (i >= fragment.length) return;
             
-            // Find which fragment index this note corresponds to
-            const fragIdx = layoutItems[i]?.fragmentIndex;
-            if (fragIdx === undefined || fragIdx < 0) return;
-            
-            const isSelected = fragIdx === state.selectedNoteIndex;
-            const isCorrect = state.userPitches[fragIdx] === fragment[fragIdx].midi;
+            const isSelected = i === state.selectedNoteIndex;
+            const isCorrect = state.userPitches[i] === fragment[i].midi;
             
             let color = '#FF8C00'; // default orange
             if (state.submitted) {
@@ -1364,14 +1361,39 @@ function renderStaff() {
                 color = '#FFFFFF';
             }
             
-            noteGroup.querySelectorAll('path, line, rect, text').forEach(child => {
-                child.style.fill = color;
-                child.style.stroke = color;
-            });
+            // Color the notehead and its parent group (stem, beams, flags, etc.)
+            const noteGroup = notehead.closest('.vf-stavenote');
+            if (noteGroup) {
+                noteGroup.querySelectorAll('path, line, rect, ellipse, circle').forEach(el => {
+                    el.style.fill = color;
+                    el.style.stroke = color;
+                });
+            } else {
+                notehead.style.fill = color;
+                notehead.style.stroke = color;
+            }
         });
+    }
+    
+    function extractNotePositions() {
+        const svg = container.querySelector('svg');
+        if (!svg) return;
         
-        // Show selected note pitch in the interval-display div
-        if (!state.submitted && state.selectedNoteIndex >= 0) {
+        state.notePositions = [];
+        const noteheads = svg.querySelectorAll('.vf-notehead');
+        
+        noteheads.forEach((notehead, i) => {
+            if (i < fragment.length) {
+                const bbox = notehead.getBBox();
+                const ctm = notehead.getCTM();
+                // Get absolute x position
+                state.notePositions[i] = ctm ? ctm.e + bbox.x : bbox.x;
+            }
+        });
+    }
+    
+    function updateIntervalDisplay() {
+        if (!state.submitted && state.selectedNoteIndex >= 0 && state.selectedNoteIndex < state.userPitches.length) {
             const userMidi = state.userPitches[state.selectedNoteIndex];
             const noteName = midiToNoteName(userMidi, true);
             const display = document.getElementById('interval-display');
@@ -1380,14 +1402,7 @@ function renderStaff() {
                 display.style.color = '#FFFFFF';
             }
         }
-        
-        // Adjust SVG dimensions for horizontal scroll
-        const bbox = svgElement.getBBox();
-        const finalWidth = Math.max(totalWidth, bbox.width + 40);
-        svgElement.setAttribute('width', finalWidth);
-        svgElement.setAttribute('viewBox', `0 0 ${finalWidth} 200`);
-        svg.style.minWidth = finalWidth + 'px';
-    }, 10);
+    }
 }
 
 function createSVGElement(type, attrs) {
