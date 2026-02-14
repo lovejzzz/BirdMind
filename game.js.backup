@@ -1117,8 +1117,6 @@ function drawRest(svg, x, topLine, lineSpacing, duration, divisions) {
     svg.appendChild(text);
 }
 
-// VexFlow-based renderStaff replacement for Charlie Parker's Mind
-
 function renderStaff() {
     const svg = document.getElementById('staff-svg');
     svg.innerHTML = '';
@@ -1126,240 +1124,401 @@ function renderStaff() {
     const fragment = state.currentFragment;
     if (!fragment || fragment.length === 0) return;
     
+    // Use dynamic staff config based on screen width and fragment length
+    const config = getStaffConfig();
+    const { lines, lineSpacing, topLine, leftMargin, noteSpacing } = config;
+    const hs = lineSpacing / 2; // half-space
     const divisions = state.currentSongData?.divisions || 120;
-    const timeSig = state.currentSongData?.timeSignature || { beats: 4, beatType: 4 };
-    const keySig = state.currentSongData?.keySignature || { fifths: 0 };
     
-    // MIDI to VexFlow key converter
-    function midiToVexKey(midi) {
-        const noteNames = ['c', 'c#', 'd', 'd#', 'e', 'f', 'f#', 'g', 'g#', 'a', 'a#', 'b'];
-        const noteName = noteNames[midi % 12];
-        const octave = Math.floor(midi / 12) - 1;
-        return noteName + '/' + octave;
-    }
+    // ========================================================================
+    // PROPORTIONAL SPACING CALCULATION
+    // ========================================================================
     
-    // Duration type mapping
-    function typeToVexDuration(type) {
-        const map = {
-            'whole': 'w',
-            'half': 'h',
-            'quarter': 'q',
-            'eighth': '8',
-            '16th': '16'
-        };
-        return map[type] || 'q';
-    }
-    
-    // Check if note is dotted
-    function isDotted(duration, divisions) {
-        const quarterNote = divisions;
-        return Math.abs(duration - quarterNote * 1.5) < 10 || 
-               Math.abs(duration - quarterNote * 0.75) < 5;
-    }
-    
-    // Create VexFlow renderer
-    const VF = Vex.Flow;
-    const renderer = new VF.Renderer(svg, VF.Renderer.Backends.SVG);
-    
-    // Calculate staff width based on fragment length
-    const noteSpacing = 65;
-    const leftMargin = 75;
-    let estimatedWidth = leftMargin + fragment.length * noteSpacing + 100;
-    
-    renderer.resize(estimatedWidth, 200);
-    const context = renderer.getContext();
-    
-    // Create stave with clef and time signature
-    const stave = new VF.Stave(10, 40, estimatedWidth - 40);
-    stave.addClef('treble');
-    stave.addTimeSignature(`${timeSig.beats}/${timeSig.beatType}`);
-    
-    // Add key signature if present
-    if (keySig.fifths !== 0) {
-        const keyMap = {
-            '-7': 'Cb', '-6': 'Gb', '-5': 'Db', '-4': 'Ab', '-3': 'Eb', '-2': 'Bb', '-1': 'F',
-            '0': 'C', '1': 'G', '2': 'D', '3': 'A', '4': 'E', '5': 'B', '6': 'F#', '7': 'C#'
-        };
-        const keyName = keyMap[keySig.fifths.toString()] || 'C';
-        stave.addKeySignature(keyName);
-    }
-    
-    stave.setContext(context).draw();
-    
-    // Build layout items (notes + rests for gaps)
+    // Build layout items (notes + gaps for rests)
     const layoutItems = [];
-    const noteIndices = []; // Track which layoutItem corresponds to which fragment index
-    
     for (let i = 0; i < fragment.length; i++) {
         // Check for gap before this note
         if (i > 0) {
             const prevEnd = fragment[i-1].startDiv + fragment[i-1].duration;
             const gap = fragment[i].startDiv - prevEnd;
             if (gap > 0) {
-                // Add rest for gap
-                const restType = gap >= divisions ? 'qr' : gap >= divisions/2 ? '8r' : '16r';
-                layoutItems.push({ type: 'rest', duration: restType, fragmentIndex: -1 });
+                layoutItems.push({ type: 'rest', duration: gap, index: -1 });
             }
         }
-        
-        const note = fragment[i];
-        const userMidi = state.userPitches[i];
-        
-        // Rhythm mode: always use b/4 unless submitted or showing answer
-        const showRealPitch = state.submitted || state.showingAnswer;
-        const vexKey = showRealPitch ? midiToVexKey(userMidi) : 'b/4';
-        const vexDuration = typeToVexDuration(note.type);
-        
-        const staveNote = new VF.StaveNote({
-            keys: [vexKey],
-            duration: vexDuration
-        });
-        
-        // Add dot if needed
-        if (isDotted(note.duration, divisions)) {
-            staveNote.addDot(0);
-        }
-        
-        // Add accidental if needed (only in answer mode)
-        if (showRealPitch && needsAccidental(userMidi)) {
-            const midi = userMidi % 12;
-            const accidental = [1, 3, 6, 8, 10].includes(midi) ? '#' : null;
-            if (accidental) {
-                staveNote.addModifier(new VF.Accidental(accidental), 0);
-            }
-        }
-        
-        layoutItems.push({ type: 'note', vexNote: staveNote, fragmentIndex: i });
-        noteIndices.push(i);
+        layoutItems.push({ type: 'note', duration: fragment[i].duration, index: i, note: fragment[i] });
     }
     
-    // Create voices and format
-    const notes = layoutItems.map(item => item.type === 'rest' ? 
-        new VF.StaveNote({ keys: ['b/4'], duration: item.duration }) : item.vexNote);
+    // Fixed note spacing with proportional rest gaps — scrolls horizontally
+    const baseSpacing = noteSpacing; // from config (65px)
+    let currentX = leftMargin;
+    const positions = []; // X position for each note index
     
-    const voice = new VF.Voice({ num_beats: timeSig.beats * 4, beat_value: timeSig.beatType });
-    voice.setStrict(false);
-    voice.addTickables(notes);
-    
-    // Format and draw
-    const formatter = new VF.Formatter();
-    const staveWidth = stave.getWidth() - stave.getModifierXShift();
-    formatter.joinVoices([voice]).format([voice], staveWidth);
-    voice.draw(context, stave);
-    
-    // Auto-beam eighth and sixteenth notes
-    const beamableNotes = [];
-    const beamableIndices = [];
-    
-    notes.forEach((note, i) => {
-        const duration = note.getDuration();
-        if (duration === '8' || duration === '16') {
-            beamableNotes.push(note);
-            beamableIndices.push(i);
-        } else if (beamableNotes.length >= 2) {
-            const beam = new VF.Beam(beamableNotes);
-            beam.setContext(context).draw();
-            beamableNotes.length = 0;
-            beamableIndices.length = 0;
-        } else {
-            beamableNotes.length = 0;
-            beamableIndices.length = 0;
-        }
-    });
-    
-    if (beamableNotes.length >= 2) {
-        const beam = new VF.Beam(beamableNotes);
-        beam.setContext(context).draw();
-    }
-    
-    // Extract note positions for playhead
-    state.notePositions = [];
-    let noteCounter = 0;
-    
-    layoutItems.forEach((item, i) => {
+    layoutItems.forEach(item => {
         if (item.type === 'note') {
-            const vexNote = notes[i];
-            const x = vexNote.getAbsoluteX();
-            state.notePositions[item.fragmentIndex] = x;
+            positions[item.index] = currentX;
+            // Wider spacing for longer notes (subtle: half notes get 1.3x, quarters 1x, eighths 0.85x)
+            const qDur = divisions;
+            const ratio = Math.min(1.5, Math.max(0.8, Math.sqrt(item.duration / qDur)));
+            currentX += baseSpacing * ratio;
+        } else {
+            // Rest gap — proportional to rest duration but capped
+            const qDur = divisions;
+            const restWidth = Math.min(baseSpacing * 1.5, Math.max(20, baseSpacing * (item.duration / qDur) * 0.6));
+            drawRest(svg, currentX + restWidth / 2, topLine, lineSpacing, item.duration, divisions);
+            currentX += restWidth;
         }
     });
     
-    // Apply Flipper Zero theme colors
-    setTimeout(() => {
-        const svgElement = svg.querySelector('svg');
-        if (!svgElement) return;
+    // Store positions for playhead access
+    state.notePositions = positions;
+    
+    // Calculate SVG dimensions based on actual width used
+    const staffWidth = currentX + 40;
+    const staffHeight = topLine + (lines - 1) * lineSpacing + topLine;
+    svg.setAttribute('viewBox', `0 0 ${staffWidth} ${staffHeight}`);
+    svg.setAttribute('width', staffWidth);
+    svg.setAttribute('height', staffHeight);
+    svg.style.minWidth = staffWidth + 'px';
+    
+    // ========================================================================
+    // DRAW STAFF LINES
+    // ========================================================================
+    
+    for (let i = 0; i < lines; i++) {
+        const y = topLine + i * lineSpacing;
+        svg.appendChild(createSVGElement('line', {
+            x1: leftMargin - 15,
+            y1: y,
+            x2: staffWidth - 20,
+            y2: y,
+            class: 'staff-line'
+        }));
+    }
+    
+    // ========================================================================
+    // DRAW TREBLE CLEF & TIME SIGNATURE
+    // ========================================================================
+    
+    const clefText = createSVGElement('text', {
+        x: leftMargin - 38,
+        y: topLine + 3 * lineSpacing, // G clef wraps around the G line (2nd from bottom)
+        'font-size': lineSpacing * 3.5,
+        'font-family': 'Bravura',
+        fill: 'var(--fg)'
+    });
+    clefText.textContent = SMUFL.gClef;
+    svg.appendChild(clefText);
+    
+    const timeSig = state.currentSongData?.timeSignature || { beats: 4, beatType: 4 };
+    const timeSigDigits = [SMUFL.timeSig0, SMUFL.timeSig1, SMUFL.timeSig2, SMUFL.timeSig3,
+        SMUFL.timeSig4, SMUFL.timeSig5, SMUFL.timeSig6, SMUFL.timeSig7, SMUFL.timeSig8, SMUFL.timeSig9];
+    
+    // Top number (beats)
+    const beatsText = createSVGElement('text', {
+        x: leftMargin - 5,
+        y: topLine + lineSpacing * 1.5,
+        'font-size': lineSpacing * 2.5,
+        'font-family': 'Bravura',
+        fill: 'var(--fg)',
+        'text-anchor': 'middle'
+    });
+    beatsText.textContent = timeSigDigits[timeSig.beats] || timeSig.beats.toString();
+    svg.appendChild(beatsText);
+    
+    // Bottom number (beat type)
+    const beatTypeText = createSVGElement('text', {
+        x: leftMargin - 5,
+        y: topLine + lineSpacing * 3.5,
+        'font-size': lineSpacing * 2.5,
+        'font-family': 'Bravura',
+        fill: 'var(--fg)',
+        'text-anchor': 'middle'
+    });
+    beatTypeText.textContent = timeSigDigits[timeSig.beatType] || timeSig.beatType.toString();
+    svg.appendChild(beatTypeText);
+    
+    // ========================================================================
+    // DRAW KEY SIGNATURE (if present)
+    // ========================================================================
+    
+    const keySig = state.currentSongData?.keySignature || { fifths: 0 };
+    if (keySig.fifths !== 0) {
+        const isSharp = keySig.fifths > 0;
+        const count = Math.abs(keySig.fifths);
+        const symbol = isSharp ? SMUFL.accidentalSharp : SMUFL.accidentalFlat;
         
-        // Change all paths, lines, and rects to orange by default
-        svgElement.querySelectorAll('path, line, rect').forEach(el => {
-            if (el.getAttribute('fill') && el.getAttribute('fill') !== 'none') {
-                el.setAttribute('fill', '#FF8C00');
-            }
-            if (el.getAttribute('stroke')) {
-                el.setAttribute('stroke', '#FF8C00');
-            }
-        });
+        // Standard staff positions for key signature accidentals (treble clef)
+        // Position 0 = top line (F5), each +1 = one step down (half lineSpacing)
+        // Sharps order: F C G D A E B — staff positions from top line
+        const sharpPositions = [0, 3, -1, 2, 5, 1, 4]; // F5, C5, G5, D5, A4, E5, B4
+        // Flats order: B E A D G C F — staff positions from top line
+        const flatPositions = [4, 1, 5, 2, 6, 3, 7];   // B4, E5, A4, D5, G4, C5, F4
         
-        // Color code notes based on state
-        const noteElements = svgElement.querySelectorAll('.vf-notehead');
-        noteElements.forEach((el, i) => {
-            if (i < fragment.length) {
-                const userMidi = state.userPitches[i];
-                const correctMidi = fragment[i].midi;
-                const isSelected = i === state.selectedNoteIndex;
-                const isCorrect = userMidi === correctMidi;
-                
-                let color = '#FF8C00'; // default orange
-                
-                if (state.submitted) {
-                    color = isCorrect ? '#00FF00' : '#FF4444';
-                } else if (isSelected) {
-                    color = '#FFFFFF';
+        const positions = isSharp ? sharpPositions : flatPositions;
+        
+        for (let i = 0; i < Math.min(count, 7); i++) {
+            const staffPos = positions[i];
+            const y = topLine + staffPos * (lineSpacing / 2);
+            const x = leftMargin + 12 + i * 10;
+            
+            const keyAccidental = createSVGElement('text', {
+                x: x,
+                y: y + 16 * 0.1, // baseline adjustment for SMuFL
+                'font-size': '16',
+                'font-family': 'Bravura',
+                fill: 'var(--fg)',
+                'text-anchor': 'middle'
+            });
+            keyAccidental.textContent = symbol;
+            svg.appendChild(keyAccidental);
+        }
+    }
+    
+    // ========================================================================
+    // DRAW BARLINES (measure boundaries using proportional positions)
+    // ========================================================================
+    
+    // Use measureIndex from MusicXML parsing — the source of truth for measure boundaries
+    fragment.forEach((note, index) => {
+        if (index >= fragment.length - 1) return;
+        const nextNote = fragment[index + 1];
+        
+        if (note.measureIndex != null && nextNote.measureIndex != null &&
+            nextNote.measureIndex > note.measureIndex) {
+            const barlineX = (positions[index] + positions[index + 1]) / 2;
+            
+            svg.appendChild(createSVGElement('line', {
+                x1: barlineX,
+                y1: topLine,
+                x2: barlineX,
+                y2: topLine + (lines - 1) * lineSpacing,
+                stroke: 'var(--fg)',
+                'stroke-width': 2
+            }));
+        }
+    });
+    
+    // ========================================================================
+    // DOUBLE BARLINE AT FRAGMENT END
+    // ========================================================================
+    
+    const endX = staffWidth - 20;
+    // Thin line
+    svg.appendChild(createSVGElement('line', {
+        x1: endX - 5,
+        y1: topLine,
+        x2: endX - 5,
+        y2: topLine + (lines - 1) * lineSpacing,
+        stroke: 'var(--fg)',
+        'stroke-width': 1.5
+    }));
+    // Thick line
+    svg.appendChild(createSVGElement('line', {
+        x1: endX,
+        y1: topLine,
+        x2: endX,
+        y2: topLine + (lines - 1) * lineSpacing,
+        stroke: 'var(--fg)',
+        'stroke-width': 4
+    }));
+    
+    // ========================================================================
+    // PRE-COMPUTE NOTE DATA (using proportional positions)
+    // ========================================================================
+    
+    const noteData = fragment.map((note, index) => {
+        const x = positions[index];
+        const midi = state.userPitches[index];
+        const staffPos = midiToStaffPosition(midi);
+        const y = topLine + 2 * lineSpacing - staffPos * hs;
+        const stemUp = staffPos <= 0;
+        return { x, y, midi, staffPos, stemUp, note, index };
+    });
+    
+    // Identify beam groups: consecutive eighth/sixteenth notes, split at beat boundaries
+    // In standard notation, beams group notes within the same beat (quarter note)
+    const beatDiv = state.currentSongData ? state.currentSongData.divisions : 120;
+    const beamGroups = [];
+    let currentGroup = [];
+    
+    function getBeat(note) {
+        // Which beat does this note start on? (0-based, each beat = divisions ticks)
+        if (note.startDiv != null) return Math.floor(note.startDiv / beatDiv);
+        return -1;
+    }
+    
+    for (let i = 0; i < fragment.length; i++) {
+        const type = fragment[i].type;
+        if (type === 'eighth' || type === '16th') {
+            // Break beam at beat boundaries
+            if (currentGroup.length > 0) {
+                const prevBeat = getBeat(fragment[currentGroup[currentGroup.length - 1]]);
+                const curBeat = getBeat(fragment[i]);
+                if (curBeat !== prevBeat && prevBeat >= 0 && curBeat >= 0) {
+                    if (currentGroup.length >= 2) beamGroups.push([...currentGroup]);
+                    currentGroup = [];
                 }
-                
-                // Apply color to notehead and related elements
-                const parent = el.parentElement;
-                parent.querySelectorAll('path, circle, rect, line').forEach(child => {
-                    if (child.getAttribute('fill') && child.getAttribute('fill') !== 'none') {
-                        child.setAttribute('fill', color);
-                    }
-                    if (child.getAttribute('stroke')) {
-                        child.setAttribute('stroke', color);
-                    }
-                });
             }
-        });
+            currentGroup.push(i);
+        } else {
+            if (currentGroup.length >= 2) beamGroups.push([...currentGroup]);
+            currentGroup = [];
+        }
+    }
+    if (currentGroup.length >= 2) beamGroups.push([...currentGroup]);
+    
+    // Set of indices that are beamed (no individual flags)
+    const beamedIndices = new Set();
+    beamGroups.forEach(g => g.forEach(i => beamedIndices.add(i)));
+    
+    // Draw each note
+    noteData.forEach((nd, index) => {
+        const { x, y, midi, staffPos, stemUp, note } = nd;
         
-        // Draw selected note indicator if not submitted
-        if (!state.submitted && state.selectedNoteIndex >= 0) {
-            const selectedX = state.notePositions[state.selectedNoteIndex];
-            if (selectedX) {
-                const arrow = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
-                const arrowY = 160;
-                arrow.setAttribute('points', `${selectedX},${arrowY} ${selectedX - 6},${arrowY + 8} ${selectedX + 6},${arrowY + 8}`);
-                arrow.setAttribute('fill', '#FFFFFF');
-                svgElement.appendChild(arrow);
-                
-                // Note name tooltip
-                const userMidi = state.userPitches[state.selectedNoteIndex];
-                const noteName = midiToNoteName(userMidi, true);
-                const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-                text.setAttribute('x', selectedX);
-                text.setAttribute('y', arrowY + 20);
-                text.setAttribute('font-size', '10');
-                text.setAttribute('fill', '#FFFFFF');
-                text.setAttribute('text-anchor', 'middle');
-                text.textContent = noteName;
-                svgElement.appendChild(text);
-            }
+        // Ledger lines
+        drawLedgerLines(svg, x, staffPos, lineSpacing, topLine);
+        
+        // Playback cursor handled by updatePlayhead() — no re-render needed
+        
+        // Notehead class
+        const isPlaybackNote = state.playbackActive && index === state.playbackCursorIndex;
+        const isCorrect = midi === note.midi;
+        let noteheadClass = state.submitted 
+            ? (isCorrect ? 'notehead correct' : 'notehead incorrect revealing')
+            : isPlaybackNote ? 'notehead selected'
+            : (index === state.selectedNoteIndex ? 'notehead selected' : 'notehead');
+        
+        // Draw notehead (tilted ellipse like real notation)
+        drawNotehead(svg, x, y, note.type, noteheadClass);
+        
+        // Draw stem
+        if (note.type !== 'whole') {
+            drawStem(svg, x, y, stemUp);
         }
         
-        // Adjust SVG dimensions for horizontal scroll
-        const bbox = svgElement.getBBox();
-        const finalWidth = Math.max(estimatedWidth, bbox.width + 40);
-        svgElement.setAttribute('width', finalWidth);
-        svgElement.setAttribute('viewBox', `0 0 ${finalWidth} 200`);
-        svg.style.minWidth = finalWidth + 'px';
-    }, 10);
+        // Draw flags only for unbeamed eighth/sixteenth notes
+        if (!beamedIndices.has(index)) {
+            if (note.type === 'eighth') drawFlag(svg, x, y, stemUp, 1);
+            else if (note.type === '16th') drawFlag(svg, x, y, stemUp, 2);
+        }
+        
+        // Accidental
+        if (needsAccidental(midi)) {
+            const preferSharps = state.submitted ? undefined : true;
+            const accStr = getAccidental(midi, preferSharps);
+            const acc = (accStr.includes('#') || accStr.includes('♯')) ? SMUFL.accidentalSharp : SMUFL.accidentalFlat;
+            const fontSize = 36;
+            const accEl = createSVGElement('text', {
+                x: x - 14,
+                y: y + fontSize * 0.12,
+                'font-size': fontSize,
+                'font-family': 'Bravura',
+                fill: noteheadClass.includes('correct') ? 'var(--correct)' :
+                      noteheadClass.includes('incorrect') ? 'var(--incorrect)' :
+                      noteheadClass.includes('selected') ? 'var(--selected)' : 'var(--fg)',
+                'text-anchor': 'middle'
+            });
+            accEl.textContent = acc;
+            svg.appendChild(accEl);
+        }
+        
+        // Dotted note indicator
+        const duration = note.duration;
+        const divisions = state.currentSongData?.divisions || 120;
+        const quarterNote = divisions;
+        const isDotted = Math.abs(duration - quarterNote * 1.5) < 10 || 
+                        Math.abs(duration - quarterNote * 0.75) < 5;
+        if (isDotted) {
+            svg.appendChild(createSVGElement('circle', {
+                cx: x + 11,
+                cy: y,
+                r: 2,
+                fill: noteheadClass.includes('correct') ? 'var(--correct)' :
+                      noteheadClass.includes('incorrect') ? 'var(--incorrect)' :
+                      noteheadClass.includes('selected') ? 'var(--selected)' : 'var(--fg)'
+            }));
+        }
+        
+        // Selected note indicator (arrow below) - PRIORITY 2.8: Smart tooltip positioning
+        if (!state.submitted && index === state.selectedNoteIndex) {
+            // Determine tooltip position based on note height
+            const isHighNote = staffPos > 2;
+            const isLowNote = staffPos < -4;
+            
+            let arrowY, tooltipY;
+            if (isHighNote) {
+                // Show below for high notes
+                arrowY = topLine + (lines - 1) * lineSpacing + 15;
+                tooltipY = arrowY + 20;
+            } else if (isLowNote) {
+                // Show above for very low notes
+                arrowY = topLine - 15;
+                tooltipY = arrowY - 8;
+            } else {
+                // Default below
+                arrowY = topLine + (lines - 1) * lineSpacing + 15;
+                tooltipY = arrowY + 20;
+            }
+            
+            // Arrow indicator
+            const arrowDir = (isHighNote || !isLowNote) ? 1 : -1;
+            svg.appendChild(createSVGElement('polygon', {
+                points: arrowDir > 0 
+                    ? `${x},${arrowY} ${x - 6},${arrowY + 8} ${x + 6},${arrowY + 8}`
+                    : `${x},${arrowY} ${x - 6},${arrowY - 8} ${x + 6},${arrowY - 8}`,
+                fill: 'var(--selected)',
+                class: 'note-arrow'
+            }));
+            
+            // Note name tooltip
+            const noteName = midiToNoteName(midi, true);
+            const tooltipEl = createSVGElement('text', {
+                x: x,
+                y: tooltipY,
+                'font-size': '10',
+                'font-family': 'var(--font)',
+                fill: 'var(--selected)',
+                'text-anchor': 'middle'
+            });
+            tooltipEl.textContent = noteName;
+            svg.appendChild(tooltipEl);
+        }
+    });
+    
+    // Draw beams
+    beamGroups.forEach(group => {
+        drawBeamGroup(svg, group, noteData, fragment);
+    });
+    
+    // ========================================================================
+    // DRAW TIES
+    // ========================================================================
+    
+    // Draw ties between consecutive notes of the same pitch
+    for (let i = 0; i < fragment.length - 1; i++) {
+        if (fragment[i].tieStart) {
+            const x1 = positions[i];
+            const x2 = positions[i + 1];
+            const y1 = noteData[i].y;
+            const y2 = noteData[i + 1].y;
+            const stemUp = noteData[i].stemUp;
+            
+            // Tie curves away from the stems (below if stems up, above if stems down)
+            const curveDir = stemUp ? 1 : -1;
+            const midX = (x1 + x2) / 2;
+            const midY = (y1 + y2) / 2 + curveDir * 12;
+            
+            // Draw tie as a quadratic bezier curve
+            const d = `M ${x1 + 8} ${y1 + curveDir * 6} Q ${midX} ${midY} ${x2 - 8} ${y2 + curveDir * 6}`;
+            svg.appendChild(createSVGElement('path', {
+                d: d,
+                stroke: 'var(--fg)',
+                fill: 'none',
+                'stroke-width': 1.8,
+                'stroke-linecap': 'round'
+            }));
+        }
+    }
 }
 
 function createSVGElement(type, attrs) {
