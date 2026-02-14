@@ -1160,12 +1160,14 @@ function renderStaff() {
     const renderer = new VF.Renderer(svg, VF.Renderer.Backends.SVG);
     
     // Calculate staff width based on fragment length
+    const scaleFactor = 1.8;
     const noteSpacing = 65;
-    const leftMargin = 75;
+    const leftMargin = 80;
     let estimatedWidth = leftMargin + fragment.length * noteSpacing + 100;
     
-    renderer.resize(estimatedWidth, 200);
+    renderer.resize(estimatedWidth * scaleFactor, 200 * scaleFactor);
     const context = renderer.getContext();
+    context.scale(scaleFactor, scaleFactor);
     
     // Create stave with clef and time signature
     const stave = new VF.Stave(10, 40, estimatedWidth - 40);
@@ -1239,36 +1241,18 @@ function renderStaff() {
     voice.setStrict(false);
     voice.addTickables(notes);
     
+    // Create beams BEFORE drawing (so VexFlow suppresses individual flags)
+    const beams = VF.Beam.generateBeams(notes, {
+        beam_rests: false,
+        maintain_stem_directions: false
+    });
+    
     // Format and draw
     const formatter = new VF.Formatter();
     const staveWidth = stave.getWidth() - stave.getModifierXShift();
     formatter.joinVoices([voice]).format([voice], staveWidth);
     voice.draw(context, stave);
-    
-    // Auto-beam eighth and sixteenth notes
-    const beamableNotes = [];
-    const beamableIndices = [];
-    
-    notes.forEach((note, i) => {
-        const duration = note.getDuration();
-        if (duration === '8' || duration === '16') {
-            beamableNotes.push(note);
-            beamableIndices.push(i);
-        } else if (beamableNotes.length >= 2) {
-            const beam = new VF.Beam(beamableNotes);
-            beam.setContext(context).draw();
-            beamableNotes.length = 0;
-            beamableIndices.length = 0;
-        } else {
-            beamableNotes.length = 0;
-            beamableIndices.length = 0;
-        }
-    });
-    
-    if (beamableNotes.length >= 2) {
-        const beam = new VF.Beam(beamableNotes);
-        beam.setContext(context).draw();
-    }
+    beams.forEach(beam => beam.setContext(context).draw());
     
     // Extract note positions for playhead
     state.notePositions = [];
@@ -1277,7 +1261,7 @@ function renderStaff() {
     layoutItems.forEach((item, i) => {
         if (item.type === 'note') {
             const vexNote = notes[i];
-            const x = vexNote.getAbsoluteX();
+            const x = vexNote.getAbsoluteX() * scaleFactor;
             state.notePositions[item.fragmentIndex] = x;
         }
     });
@@ -1330,27 +1314,14 @@ function renderStaff() {
             });
         });
         
-        // Draw selected note indicator if not submitted
+        // Show selected note pitch in the interval-display div
         if (!state.submitted && state.selectedNoteIndex >= 0) {
-            const selectedX = state.notePositions[state.selectedNoteIndex];
-            if (selectedX) {
-                const arrow = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
-                const arrowY = 160;
-                arrow.setAttribute('points', `${selectedX},${arrowY} ${selectedX - 6},${arrowY + 8} ${selectedX + 6},${arrowY + 8}`);
-                arrow.setAttribute('fill', '#FFFFFF');
-                svgElement.appendChild(arrow);
-                
-                // Note name tooltip
-                const userMidi = state.userPitches[state.selectedNoteIndex];
-                const noteName = midiToNoteName(userMidi, true);
-                const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-                text.setAttribute('x', selectedX);
-                text.setAttribute('y', arrowY + 20);
-                text.setAttribute('font-size', '10');
-                text.setAttribute('fill', '#FFFFFF');
-                text.setAttribute('text-anchor', 'middle');
-                text.textContent = noteName;
-                svgElement.appendChild(text);
+            const userMidi = state.userPitches[state.selectedNoteIndex];
+            const noteName = midiToNoteName(userMidi, true);
+            const display = document.getElementById('interval-display');
+            if (display) {
+                display.textContent = '▲ ' + noteName;
+                display.style.color = '#FFFFFF';
             }
         }
         
