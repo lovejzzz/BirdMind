@@ -958,13 +958,41 @@ function playFragmentAudio() {
         audioEnd = fragmentScoreEnd;
     }
     
-    audio.currentTime = audioStart;
-    audio.play().catch(err => {
-        console.error('Audio playback error:', err);
-    });
+    // Count-in: play 1 bar of clicks at tempo before the audio starts
+    const beatDuration = 60 / tempo;
+    const countInBeats = timeSig?.beats || 4;
+    const countInDuration = beatDuration * countInBeats;
     
-    // Start synced cursor
-    state.playbackActive = true;
+    // Create click sound using Tone.js
+    if (state.audioInitialized && Tone.context.state === 'running') {
+        const click = new Tone.MembraneSynth({
+            pitchDecay: 0.01,
+            octaves: 6,
+            envelope: { attack: 0.001, decay: 0.05, sustain: 0, release: 0.02 }
+        }).toDestination();
+        
+        const now = Tone.now();
+        for (let i = 0; i < countInBeats; i++) {
+            const pitch = i === 0 ? 'G5' : 'C5'; // accent beat 1
+            const vel = i === 0 ? 0.8 : 0.5;
+            click.triggerAttackRelease(pitch, '32n', now + i * beatDuration, vel);
+        }
+        
+        // Clean up synth after count-in
+        setTimeout(() => click.dispose(), (countInDuration + 1) * 1000);
+    }
+    
+    // Delay audio start by count-in duration
+    setTimeout(() => {
+        audio.currentTime = audioStart;
+        audio.play().catch(err => {
+            console.error('Audio playback error:', err);
+        });
+    }, countInDuration * 1000);
+    
+    // Start synced cursor (also delayed)
+    setTimeout(() => {
+        state.playbackActive = true;
     state.playbackCursorIndex = -1;
     
     function cursorTick() {
@@ -1019,6 +1047,7 @@ function playFragmentAudio() {
         audio.pause();
         stopPlaybackCursor();
     }, (estimatedDuration + 1) * 1000);
+    }, countInDuration * 1000); // close the cursor setTimeout
 }
 
 function updatePlayhead() {
