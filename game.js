@@ -2060,8 +2060,10 @@ function setupTouchGestures() {
         if (!state.currentFragment || state.currentFragment.length === 0) return;
         
         const rect = svg.getBoundingClientRect();
-        const viewBox = svg.viewBox.baseVal;
-        const svgX = (e.clientX - rect.left) / rect.width * viewBox.width;
+        const svgEl = svg.querySelector('svg');
+        if (!svgEl) return;
+        const viewBox = svgEl.viewBox?.baseVal;
+        const svgX = viewBox ? (e.clientX - rect.left) / rect.width * viewBox.width : (e.clientX - rect.left);
         
         // Find nearest note by X position
         // We need to reconstruct positions (same logic as in renderStaff)
