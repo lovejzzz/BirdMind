@@ -960,7 +960,7 @@ function playFragmentAudio() {
     
     // Count-in: play 1 bar of clicks at tempo before the audio starts
     const beatDuration = 60 / tempo;
-    const countInBeats = timeSig?.beats || 4;
+    const countInBeats = songData.timeSignature?.beats || 4;
     const countInDuration = beatDuration * countInBeats;
     
     // Create click sound using Tone.js
