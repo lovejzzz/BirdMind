@@ -1217,7 +1217,7 @@ function renderStaff() {
         
         // Add dot if needed
         if (isDotted(note.duration, divisions)) {
-            staveNote.addDot(0);
+            Vex.Flow.Dot.buildAndAttach([staveNote]);
         }
         
         // Add accidental if needed (only in answer mode)
