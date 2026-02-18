@@ -1960,9 +1960,7 @@ function updateBirdMascot(emotion = 'neutral') {
 function submitAnswer() {
     if (state.submitted) return;
     
-    state.submitted = true;
-    
-    // Calculate score
+    // Calculate score first (needed for Easy lives check)
     let correct = 0;
     let incorrect = 0;
     state.currentFragment.forEach((note, i) => {
@@ -1972,6 +1970,34 @@ function submitAnswer() {
             incorrect++;
         }
     });
+    
+    // --- Feature: Easy mode lives — flash errors and give another try ---
+    if (state.difficulty === 'easy' && incorrect > 0 && state.lives > 0) {
+        state.lives--;
+        updateLivesDisplay();
+        
+        // Temporarily show wrong notes in red
+        state.showErrorFlash = true;
+        renderStaff();
+        playSFX('incorrect');
+        haptic(20);
+        
+        const lifeMsg = state.lives > 0
+            ? `♥ ${state.lives} ${state.lives === 1 ? 'life' : 'lives'} left!`
+            : '♡ Last chance!';
+        showFlashMessage(lifeMsg);
+        
+        // Revert to edit mode after flash
+        setTimeout(() => {
+            state.showErrorFlash = false;
+            renderStaff();
+        }, 1200);
+        
+        return; // Don't finalize yet
+    }
+    
+    state.submitted = true;
+    stopFragmentTimer();
     
     const total = state.currentFragment.length;
     const accuracy = (correct / total) * 100;
@@ -2026,6 +2052,13 @@ function submitAnswer() {
     // NEW: Check achievements
     checkAchievements(correct, total, accuracy);
     
+    // --- Feature: Hard mode — deduct points for wrong answers ---
+    if (state.difficulty === 'hard' && incorrect > 0) {
+        const penalty = incorrect * 5;
+        state.totalScore = Math.max(0, state.totalScore - penalty);
+        showXPPenalty(-penalty);
+    }
+    
     // Show combo multiplier if active
     if (comboMultiplier > 1 && correct === total) {
         showComboMultiplier(comboMultiplier);
@@ -2057,6 +2090,11 @@ function submitAnswer() {
     
     // Show result overlay
     showFragmentResult(accuracy, stars, fragmentScore, comboMultiplier);
+    
+    // --- Feature: Correct note reveal animation (2 second delay) ---
+    if (incorrect > 0) {
+        setTimeout(() => revealCorrectNotes(), 2000);
+    }
     
     // Hide submit, show next
     document.getElementById('submit-btn').style.display = 'none';
@@ -2263,15 +2301,25 @@ function nextFragment() {
 function skipFragment() {
     if (state.submitted) return;
     
+    // --- Feature: XP penalty for skipping in Medium/Hard ---
+    if (state.difficulty !== 'easy') {
+        state.stats.xp = Math.max(0, state.stats.xp - 5);
+        saveStats();
+        showXPPenalty(-5);
+    }
+    
     // Mark as skipped with 0 score
     state.fragmentScores.push({ accuracy: 0, stars: 0, score: 0 });
     state.streak = 0;
+    stopFragmentTimer();
     
     nextFragment();
 }
 
 function showAnswer() {
     if (state.submitted) return;
+    
+    stopFragmentTimer();
     
     // Copy correct answers, apply score penalty
     state.userPitches = state.currentFragment.map(note => note.midi);
@@ -2287,6 +2335,140 @@ function showAnswer() {
     document.getElementById('skip-btn').style.display = 'none';
     document.getElementById('show-answer-btn').style.display = 'none';
     document.getElementById('undo-btn').style.display = 'none';
+}
+
+// ============================================================================
+// DIFFICULTY & LIVES HELPERS  (Features 1-5)
+// ============================================================================
+
+function startFragmentTimer(seconds) {
+    state.fragmentTimeLeft = seconds;
+    updateTimerDisplay();
+    state.fragmentTimerId = setInterval(() => {
+        state.fragmentTimeLeft--;
+        updateTimerDisplay();
+        if (state.fragmentTimeLeft <= 0) {
+            stopFragmentTimer();
+            if (!state.submitted) submitAnswer(); // auto-submit on timeout
+        }
+    }, 1000);
+}
+
+function stopFragmentTimer() {
+    if (state.fragmentTimerId) {
+        clearInterval(state.fragmentTimerId);
+        state.fragmentTimerId = null;
+    }
+}
+
+function updateTimerDisplay() {
+    const timerEl = document.getElementById('timer-display');
+    if (!timerEl) return;
+    if (state.difficulty === 'hard' && !state.submitted && state.fragmentTimeLeft > 0) {
+        timerEl.style.display = 'block';
+        timerEl.textContent = state.fragmentTimeLeft + 's';
+        timerEl.classList.toggle('timer-warning', state.fragmentTimeLeft <= 10);
+    } else {
+        timerEl.style.display = 'none';
+    }
+}
+
+function updateLivesDisplay() {
+    const livesEl = document.getElementById('lives-display');
+    if (!livesEl) return;
+    if (state.difficulty === 'easy' && !state.submitted) {
+        livesEl.style.display = 'block';
+        const full  = '♥'.repeat(Math.max(0, state.lives));
+        const empty = '♡'.repeat(Math.max(0, state.maxLives - state.lives));
+        livesEl.textContent = full + empty;
+    } else {
+        livesEl.style.display = 'none';
+    }
+}
+
+function showFlashMessage(msg, duration = 1500) {
+    const flash = document.createElement('div');
+    flash.className = 'flash-message';
+    flash.textContent = msg;
+    const gameScreen = document.getElementById('game-screen');
+    if (gameScreen) gameScreen.appendChild(flash);
+    setTimeout(() => flash.remove(), duration + 200);
+}
+
+function showXPPenalty(amount) {
+    const popup = document.createElement('div');
+    popup.className = 'score-popup';
+    popup.style.color = 'var(--incorrect)';
+    popup.style.position = 'fixed';
+    popup.style.left = '50%';
+    popup.style.top = '45%';
+    popup.style.transform = 'translate(-50%, -50%)';
+    popup.textContent = `${amount} XP`;
+    document.body.appendChild(popup);
+    setTimeout(() => popup.remove(), 1000);
+}
+
+// Reveal correct pitches for wrong notes with piano + animation
+function revealCorrectNotes() {
+    if (!state.submitted) return;
+    const fragment = state.currentFragment;
+    if (!fragment) return;
+    
+    const wrongIndices = [];
+    fragment.forEach((note, i) => {
+        if (state.userPitches[i] !== note.midi) wrongIndices.push(i);
+    });
+    if (wrongIndices.length === 0) return;
+    
+    state.wrongNoteIndices = wrongIndices;
+    state.revealingMode = true;
+    
+    // Update user pitches to correct values so OSMD renders correct positions
+    wrongIndices.forEach(i => {
+        state.userPitches[i] = fragment[i].midi;
+    });
+    
+    // Re-render — colorNotesBasedOnGameState() will handle animation + sound
+    renderStaff();
+}
+
+// Animate a single note reveal: pulse cyan → white → cyan
+function animateRevealNote(noteIdx) {
+    const svg = document.getElementById('staff-svg');
+    if (!svg) return;
+    const noteheads = svg.querySelectorAll('.vf-notehead');
+    if (noteIdx >= noteheads.length) return;
+    
+    const noteGroup = noteheads[noteIdx].closest('.vf-stavenote') || noteheads[noteIdx];
+    const startColor = [0, 204, 204];   // cyan
+    const midColor   = [255, 255, 255]; // white flash
+    const endColor   = [0, 204, 204];   // back to cyan
+    let startTs = null;
+    const duration = 500;
+    
+    function step(ts) {
+        if (!startTs) startTs = ts;
+        const p = Math.min((ts - startTs) / duration, 1);
+        let r, g, b;
+        if (p < 0.5) {
+            const pp = p * 2;
+            r = Math.round(startColor[0] + (midColor[0] - startColor[0]) * pp);
+            g = Math.round(startColor[1] + (midColor[1] - startColor[1]) * pp);
+            b = Math.round(startColor[2] + (midColor[2] - startColor[2]) * pp);
+        } else {
+            const pp = (p - 0.5) * 2;
+            r = Math.round(midColor[0] + (endColor[0] - midColor[0]) * pp);
+            g = Math.round(midColor[1] + (endColor[1] - midColor[1]) * pp);
+            b = Math.round(midColor[2] + (endColor[2] - midColor[2]) * pp);
+        }
+        const color = `rgb(${r},${g},${b})`;
+        noteGroup.querySelectorAll('path, ellipse, circle, rect').forEach(el => {
+            el.style.fill = color;
+            el.style.stroke = color;
+        });
+        if (p < 1) requestAnimationFrame(step);
+    }
+    requestAnimationFrame(step);
 }
 
 function undoLastChange() {
@@ -2534,6 +2716,20 @@ function setupEventListeners() {
     document.getElementById('left-btn').addEventListener('click', () => { moveNote('left'); haptic(8); });
     document.getElementById('right-btn').addEventListener('click', () => { moveNote('right'); haptic(8); });
     
+    // --- Feature: Octave jump buttons (±12 semitones) ---
+    ['mousedown', 'touchstart'].forEach(evt => {
+        document.getElementById('octave-up-btn').addEventListener(evt, (e) => {
+            e.preventDefault();
+            adjustPitch(12);
+            haptic(15);
+        });
+        document.getElementById('octave-down-btn').addEventListener(evt, (e) => {
+            e.preventDefault();
+            adjustPitch(-12);
+            haptic(15);
+        });
+    });
+    
     // Action buttons
     document.getElementById('replay-btn').addEventListener('click', () => {
         haptic(10);
@@ -2625,6 +2821,8 @@ function setupEventListeners() {
                 case 'ArrowDown': adjustPitch(-1); break;
                 case 'ArrowLeft': moveNote('left'); break;
                 case 'ArrowRight': moveNote('right'); break;
+                case 'PageUp': e.preventDefault(); adjustPitch(12); break;
+                case 'PageDown': e.preventDefault(); adjustPitch(-12); break;
                 case 'Enter': 
                     if (state.submitted) {
                         nextFragment();
@@ -2664,6 +2862,17 @@ function setupEventListeners() {
     }, { once: true });
     
     // About link
+    // --- Feature: Difficulty selector buttons ---
+    document.querySelectorAll('.diff-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            state.difficulty = btn.dataset.diff;
+            saveSettings();
+            document.querySelectorAll('.diff-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            haptic(10);
+        });
+    });
+    
     const aboutLink = document.getElementById('about-link');
     if (aboutLink) {
         aboutLink.addEventListener('click', (e) => {
@@ -3163,6 +3372,11 @@ async function init() {
     
     setupEventListeners();
     setupTouchGestures();
+    
+    // Sync difficulty selector UI with loaded state
+    document.querySelectorAll('.diff-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.diff === state.difficulty);
+    });
     
     // PRIORITY 3.10: Show welcome splash (first visit only)
     showWelcomeSplash();
