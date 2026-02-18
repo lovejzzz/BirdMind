@@ -1215,27 +1215,18 @@ function buildFragmentXML(fragment, xmlDoc, timeSig, keySig, divisions) {
     // Build minimal MusicXML document
     const showRealPitch = state.submitted || state.showingAnswer;
     
-    // If rhythm mode (not showing answer), blank all pitches to B4
-    if (!showRealPitch) {
-        fragmentMeasures.forEach(measure => {
-            const notes = measure.querySelectorAll('note');
-            notes.forEach(noteEl => {
-                const pitchEl = noteEl.querySelector('pitch');
-                if (pitchEl) {
-                    // Replace with B4
-                    pitchEl.innerHTML = '<step>B</step><octave>4</octave>';
-                }
-            });
-        });
-    } else {
-        // In answer mode, replace with user pitches
+    // Always render user pitches so the score reflects what the user has dialed in
+    // (During gameplay these start at B4, then change as user adjusts)
+    {
         let noteIndex = 0;
         fragmentMeasures.forEach(measure => {
             const notes = measure.querySelectorAll('note');
             notes.forEach(noteEl => {
                 const pitchEl = noteEl.querySelector('pitch');
                 if (pitchEl && noteIndex < state.userPitches.length) {
-                    const userMidi = state.userPitches[noteIndex];
+                    const userMidi = showRealPitch 
+                        ? fragment[noteIndex].midi  // show correct answer
+                        : state.userPitches[noteIndex]; // show user's current guess
                     const octave = Math.floor(userMidi / 12) - 1;
                     const pitchClass = userMidi % 12;
                     const stepMap = ['C', 'C', 'D', 'D', 'E', 'F', 'F', 'G', 'G', 'A', 'A', 'B'];
@@ -1243,10 +1234,11 @@ function buildFragmentXML(fragment, xmlDoc, timeSig, keySig, divisions) {
                     const step = stepMap[pitchClass];
                     const alter = alterMap[pitchClass];
                     
-                    let pitchHTML = `<step>${step}</step><octave>${octave}</octave>`;
+                    let pitchHTML = `<step>${step}</step>`;
                     if (alter !== 0) {
                         pitchHTML += `<alter>${alter}</alter>`;
                     }
+                    pitchHTML += `<octave>${octave}</octave>`;
                     pitchEl.innerHTML = pitchHTML;
                     noteIndex++;
                 }
@@ -1335,7 +1327,6 @@ function buildFragmentXML(fragment, xmlDoc, timeSig, keySig, divisions) {
 
 function renderStaff() {
     const container = document.getElementById('staff-svg');
-    container.innerHTML = '';
     
     // OSMD needs a visible container with width > 0
     // If container has no width yet (screen not shown), defer rendering
@@ -1364,31 +1355,53 @@ function renderStaff() {
         return;
     }
     
-    // Create OSMD instance
-    const osmd = new opensheetmusicdisplay.OpenSheetMusicDisplay(container, {
-        backend: "svg",
-        drawTitle: false,
-        drawSubtitle: false,
-        drawComposer: false,
-        drawCredits: false,
-        drawPartNames: false,
-        drawPartAbbreviations: false,
-        drawMeasureNumbers: false,
-        autoResize: false
-    });
+    // Debounce rapid re-renders (e.g. holding arrow key)
+    if (state._renderPending) {
+        state._renderQueued = fragmentXML; // store latest, will be picked up
+        return;
+    }
+    state._renderPending = true;
     
-    // Load and render
+    // Reuse OSMD instance if possible, create if needed
+    if (!state._osmdInstance) {
+        container.innerHTML = '';
+        state._osmdInstance = new opensheetmusicdisplay.OpenSheetMusicDisplay(container, {
+            backend: "svg",
+            drawTitle: false,
+            drawSubtitle: false,
+            drawComposer: false,
+            drawCredits: false,
+            drawPartNames: false,
+            drawPartAbbreviations: false,
+            drawMeasureNumbers: false,
+            autoResize: false
+        });
+    }
+    
+    const osmd = state._osmdInstance;
+    
+    // Load and render — double-buffer: don't clear old SVG until new one is ready
     osmd.load(fragmentXML).then(() => {
         osmd.render();
+        state._renderPending = false;
         
         // Post-process: apply orange theme and extract note positions
-        setTimeout(() => {
+        requestAnimationFrame(() => {
             applyOrangeTheme();
             colorNotesBasedOnGameState();
             extractNotePositions();
             updateIntervalDisplay();
-        }, 50);
+        });
+        
+        // If another render was queued while we were busy, do it now
+        if (state._renderQueued) {
+            const queued = state._renderQueued;
+            state._renderQueued = null;
+            renderStaff();
+        }
     }).catch(err => {
+        state._renderPending = false;
+        state._renderQueued = null;
         console.error('OSMD rendering error:', err);
     });
     
@@ -1812,6 +1825,11 @@ function loadFragment(index) {
     document.getElementById('skip-btn').style.display = 'flex';
     document.getElementById('show-answer-btn').style.display = 'flex';
     document.getElementById('undo-btn').style.display = 'flex';
+    
+    // Clear cached OSMD instance for fresh fragment render
+    state._osmdInstance = null;
+    state._renderPending = false;
+    document.getElementById('staff-svg').innerHTML = '';
     
     // Render staff
     renderStaff();
