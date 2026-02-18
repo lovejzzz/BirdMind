@@ -10,18 +10,26 @@
     <title>Charlie Parker's Mind</title>
     <link rel="icon" type="image/svg+xml" href="favicon.svg">
     <link rel="manifest" href="manifest.json">
-    <link rel="stylesheet" href="game.css?v=3">
+    <link rel="stylesheet" href="game.css?v=4">
 </head>
 <body style="overscroll-behavior: none; touch-action: manipulation;">
     <!-- Song Selection Screen -->
     <div id="song-select-screen" class="screen active">
         <div class="header">
+            <button id="dashboard-btn" class="dashboard-btn" title="Progress Dashboard" aria-label="Progress Dashboard">📊</button>
             <h1>CHARLIE PARKER'S MIND</h1>
             <p class="subtitle">[ EAR TRAINING ]</p>
             <div class="version">v0.1</div>
         </div>
         <div id="song-list" class="song-list"></div>
         <div class="footer">
+            <!-- Difficulty selector -->
+            <div class="difficulty-selector">
+                <span class="diff-label">MODE:</span>
+                <button class="diff-btn" data-diff="easy">EASY</button>
+                <button class="diff-btn active" data-diff="medium">MED</button>
+                <button class="diff-btn" data-diff="hard">HARD</button>
+            </div>
             <div class="footer-links">
                 <a href="#" id="stats-link" class="footer-link">Stats</a>
                 <a href="#" id="settings-link" class="footer-link">Settings</a>
@@ -39,6 +47,8 @@
                 <div id="fragment-info" class="fragment-info"></div>
             </div>
             <div id="score-display" class="score-display">0</div>
+            <div id="lives-display" class="lives-display" style="display:none;"></div>
+            <div id="timer-display" class="timer-display" style="display:none;"></div>
         </div>
         <div class="progress-bar-container">
             <div id="progress-bar" class="progress-bar"></div>
@@ -48,7 +58,6 @@
             <!-- Pixel art bird mascot -->
             <div id="bird-mascot" class="bird-mascot">
                 <svg viewBox="0 0 32 32" width="64" height="64">
-                    <!-- Bird body (pixel art style) -->
                     <rect x="10" y="8" width="2" height="2" fill="#FF8C00"/>
                     <rect x="12" y="8" width="2" height="2" fill="#FF8C00"/>
                     <rect x="14" y="6" width="2" height="2" fill="#FF8C00"/>
@@ -134,10 +143,15 @@
                     <button id="right-btn" class="dpad-btn dpad-right">►</button>
                     <button id="down-btn" class="dpad-btn dpad-down">▼</button>
                 </div>
+                <!-- Octave jump buttons -->
+                <div class="octave-btns">
+                    <button id="octave-up-btn" class="dpad-btn octave-btn" aria-label="Octave Up (+12 semitones)">▲▲</button>
+                    <button id="octave-down-btn" class="dpad-btn octave-btn" aria-label="Octave Down (-12 semitones)">▼▼</button>
+                </div>
             </div>
             
             <div class="keyboard-hint desktop-only">
-                Space=Listen | Enter=Check | Arrows=Move | U=Undo
+                Space=Listen | Enter=Check | Arrows=Move | U=Undo | PgUp/PgDn=Octave
             </div>
         </div>
     </div>
@@ -157,40 +171,17 @@
     <!-- Result overlay (shown after each fragment) -->
     <div id="result-overlay" class="result-overlay"></div>
     
-    <!-- Score summary overlay (end of song) -->
+    <!-- Song completion celebration overlay -->
     <div id="summary-overlay" class="summary-overlay"></div>
 
-    <!-- Stats Screen -->
+    <!-- Stats / Progress Dashboard Screen -->
     <div id="stats-screen" class="screen">
         <div class="header">
-            <h1>STATISTICS</h1>
+            <h1>PROGRESS</h1>
             <button id="stats-back-btn" class="back-btn" style="position: absolute; left: 0.5rem; top: 0.5rem;">← Back</button>
         </div>
-        <div class="stats-content">
-            <div class="stat-card">
-                <div class="stat-label">Level</div>
-                <div class="stat-value" id="stat-level">1</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-label">XP</div>
-                <div class="stat-value" id="stat-xp">0</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-label">Songs Completed</div>
-                <div class="stat-value" id="stat-songs">0</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-label">Total Notes</div>
-                <div class="stat-value" id="stat-notes">0</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-label">Accuracy</div>
-                <div class="stat-value" id="stat-accuracy">0%</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-label">Achievements</div>
-                <div class="stat-value" id="stat-achievements">0</div>
-            </div>
+        <div id="dashboard-content" class="dashboard-content">
+            <div class="db-loading">Loading stats...</div>
         </div>
     </div>
 
@@ -271,23 +262,37 @@
         <div class="welcome-title"></div>
     </div>
 
-    <!-- How to Play Overlay (first game only) -->
-    <div id="how-to-play" class="how-to-play-overlay">
-        <div class="how-to-play-content">
-            <div class="how-to-play-title">HOW TO PLAY</div>
-            <div class="how-to-play-steps">
-                <div class="how-to-step">🎧 LISTEN to Bird's solo</div>
-                <div class="how-to-step">🎹 Use ▲▼ to match the pitch</div>
-                <div class="how-to-step">◄► to move between notes</div>
-                <div class="how-to-step">✓ CHECK when ready</div>
-            </div>
-            <button id="how-to-play-btn" class="action-btn">TAP TO START</button>
+    <!-- Interactive Tutorial Overlay (darkener layer) -->
+    <div id="tutorial-overlay" class="tutorial-overlay">
+        <div class="tutorial-darkener"></div>
+    </div>
+
+    <!-- Tutorial box (separate from overlay to avoid z-index stacking context issues) -->
+    <div id="tutorial-box" class="tutorial-box">
+        <div class="tutorial-steps-indicator">
+            <span class="t-dot active" id="tdot-0"></span>
+            <span class="t-dot" id="tdot-1"></span>
+            <span class="t-dot" id="tdot-2"></span>
         </div>
+        <div id="tutorial-icon" class="tutorial-icon">🎧</div>
+        <div id="tutorial-title" class="tutorial-title">STEP 1: LISTEN</div>
+        <div id="tutorial-text" class="tutorial-text">Hear Bird's phrase first</div>
+        <button id="tutorial-action-btn" class="tutorial-action-btn">► PLAY IT</button>
+        <button id="tutorial-skip-btn" class="tutorial-skip-btn">skip tutorial</button>
     </div>
 
     <script src="./assets/tone.min.js"></script>
     <script src="./assets/osmd.min.js"></script>
-    <script src="./assets/vexflow.min.js?v=1"></script>
-    <script src="game.js?v=12"></script>
+    <script src="game.js?v=13"></script>
+    <script>
+        // Register Service Worker for offline support
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register('./sw.js')
+                    .then(reg => console.log('[SW] registered:', reg.scope))
+                    .catch(err => console.warn('[SW] registration failed:', err));
+            });
+        }
+    </script>
 </body>
 </html>

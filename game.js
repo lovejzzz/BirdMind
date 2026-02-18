@@ -139,11 +139,23 @@ const state = {
         sessionAccuracy: 0,
         xp: 0,
         level: 1,
-        achievements: []
+        achievements: [],
+        intervalStats: {},   // { 'M2': {correct: N, total: N}, ... }
+        totalPlayTime: 0     // seconds
     },
     // NEW: Touch gesture tracking
     touchStart: null,
-    touchEnd: null
+    touchEnd: null,
+    // ---- Difficulty / gameplay mechanics ----
+    difficulty: 'medium',    // 'easy' | 'medium' | 'hard'
+    freeNoteIndices: [],     // indices of notes pre-filled and locked (given free)
+    lives: 0,                // lives remaining this fragment (easy mode)
+    maxLives: 3,
+    fragmentTimerId: null,   // setInterval ID for hard-mode countdown
+    fragmentTimeLeft: 0,     // seconds remaining
+    wrongNoteIndices: [],    // wrong note indices recorded after submit
+    revealingMode: false,    // true while animating wrong → correct reveal
+    showErrorFlash: false    // briefly true to flash wrong notes red (easy lives)
 };
 
 // ============================================================================
@@ -250,6 +262,8 @@ function loadSettings() {
         if (data) {
             const saved = JSON.parse(data);
             state.settings = { ...state.settings, ...saved };
+            // Load difficulty (stored alongside settings)
+            if (saved.difficulty) state.difficulty = saved.difficulty;
         }
     } catch (e) {
         console.error('Failed to load settings:', e);
@@ -258,7 +272,11 @@ function loadSettings() {
 
 function saveSettings() {
     try {
-        localStorage.setItem('cpm_settings', JSON.stringify(state.settings));
+        // Persist difficulty alongside other settings
+        localStorage.setItem('cpm_settings', JSON.stringify({
+            ...state.settings,
+            difficulty: state.difficulty
+        }));
     } catch (e) {
         console.error('Failed to save settings:', e);
     }
@@ -269,7 +287,14 @@ function loadStats() {
         const data = localStorage.getItem('cpm_stats');
         if (data) {
             const saved = JSON.parse(data);
-            state.stats = { ...state.stats, ...saved };
+            // Merge saved stats; ensure nested objects are preserved correctly
+            state.stats = {
+                ...state.stats,
+                ...saved,
+                intervalStats: { ...(state.stats.intervalStats || {}), ...(saved.intervalStats || {}) },
+                achievements:  Array.isArray(saved.achievements) ? saved.achievements : state.stats.achievements,
+                totalPlayTime: typeof saved.totalPlayTime === 'number' ? saved.totalPlayTime : (state.stats.totalPlayTime || 0),
+            };
         }
     } catch (e) {
         console.error('Failed to load stats:', e);
@@ -1383,18 +1408,26 @@ function renderStaff() {
         const svg = container.querySelector('svg');
         if (!svg) return;
         
-        // Find all note heads (OSMD/VexFlow uses vf-notehead class)
+        // Find all note heads (OSMD renders with vf-notehead class)
         const noteheads = svg.querySelectorAll('.vf-notehead');
         
         noteheads.forEach((notehead, i) => {
             if (i >= fragment.length) return;
             
+            const isFree     = state.freeNoteIndices.includes(i);
             const isSelected = i === state.selectedNoteIndex;
-            const isCorrect = state.userPitches[i] === fragment[i].midi;
+            const isCorrect  = state.userPitches[i] === fragment[i].midi;
+            const isRevealed = state.revealingMode && state.wrongNoteIndices.includes(i);
             
             let color = '#FF8C00'; // default orange
-            if (state.submitted) {
-                color = isCorrect ? '#00FF00' : '#FF4444';
+            if (state.submitted || state.showErrorFlash) {
+                if (isRevealed) {
+                    color = '#00CCCC'; // teal/cyan for animated reveal
+                } else {
+                    color = isCorrect ? '#00FF00' : '#FF4444';
+                }
+            } else if (isFree && !isSelected) {
+                color = '#00CCCC'; // cyan for given-free reference note
             } else if (isSelected) {
                 color = '#FFFFFF';
             }
@@ -1411,6 +1444,19 @@ function renderStaff() {
                 notehead.style.stroke = color;
             }
         });
+        
+        // --- Feature: Reveal animation — trigger per-note sound + pulse ---
+        if (state.revealingMode && state.wrongNoteIndices.length > 0) {
+            const fragSnapshot = fragment; // capture current fragment in closure
+            state.wrongNoteIndices.forEach((noteIdx, i) => {
+                setTimeout(() => {
+                    // Guard: still on same fragment and still revealing
+                    if (state.currentFragment !== fragSnapshot || !state.revealingMode) return;
+                    playPreviewNote(fragSnapshot[noteIdx].midi);
+                    animateRevealNote(noteIdx);
+                }, i * 350);
+            });
+        }
     }
     
     function extractNotePositions() {
@@ -1726,12 +1772,31 @@ function loadFragment(index) {
     state.selectedNoteIndex = 0;
     state.submitted = false;
     state.undoStack = [];
+    state.revealingMode = false;
+    state.wrongNoteIndices = [];
+    state.showErrorFlash = false;
+    
+    // Stop any running hard-mode timer
+    stopFragmentTimer();
     
     // Initialize user pitches (all start at B4 = MIDI 71)
     state.userPitches = state.currentFragment.map(() => 71);
     
+    // --- Feature: First note(s) given free based on difficulty ---
+    const freeCount = state.difficulty === 'easy' ? 2 : state.difficulty === 'medium' ? 1 : 0;
+    state.freeNoteIndices = [];
+    for (let i = 0; i < freeCount && i < state.currentFragment.length; i++) {
+        state.userPitches[i] = state.currentFragment[i].midi;
+        state.freeNoteIndices.push(i);
+    }
+    
+    // --- Feature: Lives per fragment (Easy mode) ---
+    state.lives = state.difficulty === 'easy' ? 3 : 0;
+    
     // Update UI
     updateGameHeader();
+    updateLivesDisplay();
+    updateTimerDisplay();
     document.getElementById('submit-btn').style.display = 'flex';
     document.getElementById('next-btn').style.display = 'none';
     const playAnswerBtn = document.getElementById('play-answer-btn');
@@ -1744,6 +1809,12 @@ function loadFragment(index) {
     
     // Render staff
     renderStaff();
+    
+    // --- Feature: Hard mode countdown timer ---
+    if (state.difficulty === 'hard') {
+        const timeLimit = Math.max(15, state.currentFragment.length * 4);
+        startFragmentTimer(timeLimit);
+    }
     
     // Scroll staff to beginning so clef/time sig are visible
     requestAnimationFrame(() => {
@@ -1801,6 +1872,13 @@ function adjustPitch(semitones) {
     if (state.submitted) return;
     
     const index = state.selectedNoteIndex;
+    
+    // Free notes are locked — play the reference pitch as audio feedback instead
+    if (state.freeNoteIndices.includes(index)) {
+        playPreviewNote(state.userPitches[index]);
+        return;
+    }
+    
     const currentPitch = state.userPitches[index];
     const newPitch = Math.max(MIDI_RANGE.min, Math.min(MIDI_RANGE.max, currentPitch + semitones));
     
@@ -1843,7 +1921,20 @@ function updateIntervalDisplay() {
         const interval = calculateInterval(prevPitch, currPitch);
         const intervalName = getIntervalName(interval, interval >= 0 ? 1 : -1);
         
-        display.textContent = `Interval: ${intervalName}`;
+        let text = `Interval: ${intervalName}`;
+        
+        // Easy mode: show direction hint (up/down) for the correct target interval
+        if (state.difficulty === 'easy' && state.currentFragment) {
+            const correctPrev = state.currentFragment[index - 1]?.midi;
+            const correctCurr = state.currentFragment[index]?.midi;
+            if (correctPrev != null && correctCurr != null) {
+                const diff = correctCurr - correctPrev;
+                const arrow = diff > 0 ? '↑' : diff < 0 ? '↓' : '=';
+                text += `  |  HINT: ${arrow}`;
+            }
+        }
+        
+        display.textContent = text;
         display.classList.add('show');
     } else {
         display.classList.remove('show');
@@ -1913,6 +2004,20 @@ function submitAnswer() {
     state.stats.correctNotes += correct;
     state.stats.sessionFragments++;
     state.stats.sessionAccuracy = (state.stats.correctNotes / state.stats.totalNotes) * 100;
+    
+    // Track per-interval accuracy (intervals between consecutive notes)
+    if (!state.stats.intervalStats) state.stats.intervalStats = {};
+    for (let i = 1; i < state.currentFragment.length; i++) {
+        const semitones = Math.abs(state.currentFragment[i].midi - state.currentFragment[i-1].midi) % 12;
+        const ivName = INTERVAL_NAMES[semitones] || 'P1';
+        if (!state.stats.intervalStats[ivName]) {
+            state.stats.intervalStats[ivName] = { correct: 0, total: 0 };
+        }
+        state.stats.intervalStats[ivName].total++;
+        if (state.userPitches[i] === state.currentFragment[i].midi) {
+            state.stats.intervalStats[ivName].correct++;
+        }
+    }
     
     // NEW: Add XP
     const xpGain = correct * 10 + stars * 25;
@@ -2206,9 +2311,15 @@ function playUserAnswer() {
 function showScoreSummary() {
     // Calculate final stats
     const totalFragments = state.fragmentScores.length;
+    if (totalFragments === 0) return;
     const totalAccuracy = state.fragmentScores.reduce((sum, f) => sum + f.accuracy, 0) / totalFragments;
     const totalStars = state.fragmentScores.reduce((sum, f) => sum + f.stars, 0);
+    const avgStars = Math.min(3, Math.round(totalStars / totalFragments));
     
+    // Total XP gained this session
+    const xpGained = state.fragmentScores.reduce((sum, f) => sum + (f.stars * 25), 0)
+        + state.fragmentScores.filter(f => f.accuracy > 0).length * 5;
+
     // Check if new best
     const prevBest = loadSongStats(state.currentSong.name).bestScore;
     const isNewBest = state.totalScore > prevBest;
@@ -2220,54 +2331,118 @@ function showScoreSummary() {
         accuracy: totalAccuracy
     });
     
-    // NEW: Update global stats
+    // Update global stats & play time
     state.stats.songsCompleted++;
+    if (state.stats.sessionStart) {
+        const elapsed = (Date.now() - state.stats.sessionStart) / 1000;
+        state.stats.totalPlayTime = (state.stats.totalPlayTime || 0) + elapsed;
+        state.stats.sessionStart = null;
+    }
     saveStats();
     
-    // PRIORITY 4.14: Bird celebration dance
+    // ── Bird celebration dance ──────────────────────────────────────────────
     updateBirdMascot('dance');
     
-    // Show summary overlay
+    // ── Confetti particles ──────────────────────────────────────────────────
+    const confettiColors = ['#ff8c00', '#ffd700', '#ff4500', '#00ff88'];
+    const confetti = Array.from({ length: 22 }, (_, i) =>
+        `<div class="confetti-particle" style="--x:${Math.round(Math.random() * 100)}%; --delay:${(i * 0.13).toFixed(2)}s; --color:${confettiColors[i % confettiColors.length]}">★</div>`
+    ).join('');
+    
+    // ── Wordle-style share text (pre-built) ─────────────────────────────────
+    const starRow = '★'.repeat(avgStars) + '☆'.repeat(3 - avgStars);
+    const shareText = `🎷 Charlie Parker's Mind\n\n${state.currentSong.name}\n${starRow}\n${totalAccuracy.toFixed(0)}% accuracy — ${state.totalScore} pts\n\n#JazzEarTraining`;
+    
+    // ── Bird SVG ─────────────────────────────────────────────────────────────
+    const birdSVG = `<svg viewBox="0 0 32 32" width="56" height="56">
+        <rect x="10" y="8" width="2" height="2" fill="#FF8C00"/>
+        <rect x="12" y="8" width="2" height="2" fill="#FF8C00"/>
+        <rect x="14" y="6" width="2" height="2" fill="#FF8C00"/>
+        <rect x="16" y="6" width="2" height="2" fill="#FF8C00"/>
+        <rect x="18" y="8" width="2" height="2" fill="#FF8C00"/>
+        <rect x="20" y="8" width="2" height="2" fill="#FF8C00"/>
+        <rect x="8"  y="10" width="2" height="2" fill="#FF8C00"/>
+        <rect x="10" y="10" width="2" height="2" fill="#FF8C00"/>
+        <rect x="12" y="10" width="2" height="2" fill="#FF8C00"/>
+        <rect x="14" y="10" width="2" height="2" fill="#FF8C00"/>
+        <rect x="16" y="10" width="2" height="2" fill="#FF8C00"/>
+        <rect x="18" y="10" width="2" height="2" fill="#FF8C00"/>
+        <rect x="20" y="10" width="2" height="2" fill="#FF8C00"/>
+        <rect x="22" y="10" width="2" height="2" fill="#FF8C00"/>
+        <rect x="18" y="10" width="2" height="2" fill="#000"/>
+        <rect x="10" y="12" width="2" height="2" fill="#FF8C00"/>
+        <rect x="12" y="12" width="2" height="2" fill="#FF8C00"/>
+        <rect x="14" y="12" width="2" height="2" fill="#FF8C00"/>
+        <rect x="16" y="12" width="2" height="2" fill="#FF8C00"/>
+        <rect x="18" y="12" width="2" height="2" fill="#FF8C00"/>
+        <rect x="20" y="12" width="2" height="2" fill="#FF8C00"/>
+        <rect x="12" y="14" width="2" height="2" fill="#FF8C00"/>
+        <rect x="14" y="14" width="2" height="2" fill="#FF8C00"/>
+        <rect x="16" y="14" width="2" height="2" fill="#FF8C00"/>
+        <rect x="18" y="14" width="2" height="2" fill="#FF8C00"/>
+        <rect x="12" y="16" width="2" height="2" fill="#FF8C00"/>
+        <rect x="18" y="16" width="2" height="2" fill="#FF8C00"/>
+    </svg>`;
+    
+    // ── Render overlay ──────────────────────────────────────────────────────
     const overlay = document.getElementById('summary-overlay');
     overlay.innerHTML = `
-        <div class="summary-content">
-            <h2>SONG COMPLETE!</h2>
-            ${isNewBest ? '<div style="font-size: 0.7rem; color: var(--correct); margin-bottom: 0.5rem;">🎉 NEW BEST! 🎉</div>' : ''}
-            <div class="summary-song">${state.currentSong.name}</div>
-            <div class="summary-stat">
-                <div class="stat-label">Total Score</div>
-                <div class="stat-value">${state.totalScore}</div>
+        ${confetti}
+        <div class="celebration-content">
+            <div class="celebration-bird dance">${birdSVG}</div>
+            <div class="celebration-title">SONG COMPLETE!</div>
+            ${isNewBest ? '<div class="celebration-new-best">★ NEW BEST! ★</div>' : ''}
+            <div class="celebration-song">${state.currentSong.name}</div>
+            
+            <div class="celebration-stars">
+                ${Array.from({ length: avgStars },     (_, i) => `<span class="cel-star"     style="--delay:${(i * 0.2).toFixed(1)}s">★</span>`).join('')}
+                ${Array.from({ length: 3 - avgStars }, ()    => `<span class="cel-star-empty">☆</span>`).join('')}
             </div>
-            <div class="summary-stat">
-                <div class="stat-label">Accuracy</div>
-                <div class="stat-value">${totalAccuracy.toFixed(1)}%</div>
+            
+            <div class="celebration-stats">
+                <div class="cel-stat">
+                    <span class="cel-stat-value">${totalAccuracy.toFixed(0)}%</span>
+                    <span class="cel-stat-label">ACCURACY</span>
+                </div>
+                <div class="cel-stat">
+                    <span class="cel-stat-value">+${xpGained}</span>
+                    <span class="cel-stat-label">XP EARNED</span>
+                </div>
+                <div class="cel-stat">
+                    <span class="cel-stat-value">${state.totalScore}</span>
+                    <span class="cel-stat-label">SCORE</span>
+                </div>
             </div>
-            <div class="summary-stat">
-                <div class="stat-label">Stars Earned</div>
-                <div class="stat-value">${'★'.repeat(Math.min(3, Math.floor(totalStars / totalFragments)))} ${totalStars}/${totalFragments * 3}</div>
-            </div>
-            <div class="summary-stat">
-                <div class="stat-label">Max Streak</div>
-                <div class="stat-value">${state.maxStreak}</div>
-            </div>
-            <div style="display: flex; gap: 0.5rem; margin-top: 1.5rem; justify-content: center;">
-                <button id="summary-replay-btn" class="action-btn" style="flex: 1;">PLAY AGAIN</button>
-                <button id="summary-list-btn" class="action-btn" style="flex: 1;">SONG LIST</button>
+            
+            <button id="cel-share-btn" class="action-btn celebration-share-btn">📤 SHARE RESULT</button>
+            
+            <div class="celebration-btns">
+                <button id="summary-replay-btn" class="action-btn">↺ AGAIN</button>
+                <button id="summary-list-btn"   class="action-btn">≡ SONGS</button>
             </div>
         </div>
     `;
     overlay.classList.add('active');
     
+    document.getElementById('cel-share-btn').addEventListener('click', () => {
+        if (navigator.share) {
+            navigator.share({ title: "Charlie Parker's Mind", text: shareText }).catch(() => copyToClipboard(shareText));
+        } else {
+            copyToClipboard(shareText);
+        }
+    });
+    
     document.getElementById('summary-replay-btn').addEventListener('click', () => {
         overlay.classList.remove('active');
+        updateBirdMascot('neutral');
         startGame(state.currentSong);
     });
     
     document.getElementById('summary-list-btn').addEventListener('click', () => {
         overlay.classList.remove('active');
+        updateBirdMascot('neutral');
         showScreen('song-select-screen');
-        renderSongList(); // Refresh with updated stats
-        updateBirdMascot('neutral'); // Stop celebration
+        renderSongList();
     });
 }
 
@@ -2497,7 +2672,16 @@ function setupEventListeners() {
         });
     }
     
-    // NEW: Stats link
+    // Dashboard button (📊 icon in header)
+    const dashboardBtn = document.getElementById('dashboard-btn');
+    if (dashboardBtn) {
+        dashboardBtn.addEventListener('click', () => {
+            haptic(10);
+            showStatsScreen();
+        });
+    }
+
+    // NEW: Stats link (footer)
     const statsLink = document.getElementById('stats-link');
     if (statsLink) {
         statsLink.addEventListener('click', (e) => {
@@ -2579,16 +2763,127 @@ function setupEventListeners() {
 
 // NEW: Show stats screen
 function showStatsScreen() {
-    document.getElementById('stat-level').textContent = state.stats.level;
-    document.getElementById('stat-xp').textContent = state.stats.xp;
-    document.getElementById('stat-songs').textContent = state.stats.songsCompleted;
-    document.getElementById('stat-notes').textContent = state.stats.totalNotes;
-    const accuracy = state.stats.totalNotes > 0 
-        ? ((state.stats.correctNotes / state.stats.totalNotes) * 100).toFixed(1) 
+    const content = document.getElementById('dashboard-content');
+    if (!content) { showScreen('stats-screen'); return; }
+
+    // ── Core metrics ──────────────────────────────────────────────────────
+    const accuracy = state.stats.totalNotes > 0
+        ? (state.stats.correctNotes / state.stats.totalNotes * 100)
         : 0;
-    document.getElementById('stat-accuracy').textContent = `${accuracy}%`;
-    document.getElementById('stat-achievements').textContent = state.stats.achievements.length;
-    
+
+    const xpForNext   = state.stats.level * 100;
+    const xpProgress  = Math.min(100, (state.stats.xp / xpForNext) * 100);
+    const minutes     = Math.floor((state.stats.totalPlayTime || 0) / 60);
+
+    // ── Interval heatmap ─────────────────────────────────────────────────
+    const ivEntries = Object.entries(state.stats.intervalStats || {})
+        .filter(([, v]) => v.total > 0)
+        .map(([name, v]) => ({ name, acc: v.correct / v.total, correct: v.correct, total: v.total }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+
+    // strongest = highest accuracy (min 5 samples), weakest = lowest
+    const withSamples = ivEntries.filter(iv => iv.total >= 3);
+    const strongest = [...withSamples].sort((a, b) => b.acc - a.acc).slice(0, 3).map(iv => iv.name);
+    const weakest   = [...withSamples].sort((a, b) => a.acc - b.acc).slice(0, 3).map(iv => iv.name);
+
+    const intervalHTML = ivEntries.length > 0 ? `
+        <div class="db-section">
+            <div class="db-section-title">INTERVAL ACCURACY</div>
+            ${ivEntries.map(iv => {
+                const pct = Math.round(iv.acc * 100);
+                const barColor = iv.acc >= 0.8 ? 'var(--correct)' : iv.acc >= 0.5 ? 'var(--fg)' : 'var(--incorrect)';
+                const badge = strongest.includes(iv.name)
+                    ? `<span class="db-interval-badge strong">💪</span>`
+                    : weakest.includes(iv.name)
+                    ? `<span class="db-interval-badge weak">⚠</span>`
+                    : '';
+                return `
+                    <div class="db-interval-row">
+                        <div class="db-interval-name">${iv.name}</div>
+                        <div class="db-interval-bar-bg">
+                            <div class="db-interval-bar" style="width:${pct}%;background:${barColor}"></div>
+                        </div>
+                        <div class="db-interval-pct">${pct}%</div>
+                        ${badge}
+                    </div>
+                `;
+            }).join('')}
+        </div>
+    ` : '';
+
+    // ── Songs grid ───────────────────────────────────────────────────────
+    const songRows = state.songs.map(song => {
+        const s = loadSongStats(song.name);
+        const avgSongStars = s.attempts > 0 ? Math.min(3, Math.round(s.stars / Math.max(1, s.attempts))) : 0;
+        const completed = s.attempts > 0 && avgSongStars >= 2;
+        return { name: song.name, stats: s, avgSongStars, completed };
+    });
+    const attempted = songRows.filter(s => s.stats.attempts > 0).length;
+    const completedCount = songRows.filter(s => s.completed).length;
+
+    const songGridHTML = `
+        <div class="db-section">
+            <div class="db-section-title">SONGS — ${attempted}/${state.songs.length} tried, ${completedCount} ★★</div>
+            <div class="db-songs-grid">
+                ${songRows.map(s => `
+                    <div class="db-song-item${s.stats.attempts > 0 ? ' attempted' : ''}${s.completed ? ' completed' : ''}">
+                        <div class="db-song-name">${s.name.length > 18 ? s.name.substring(0,17)+'…' : s.name}</div>
+                        <div class="db-song-stars">${s.stats.attempts > 0
+                            ? '★'.repeat(s.avgSongStars) + '☆'.repeat(3 - s.avgSongStars)
+                            : '· · ·'
+                        }</div>
+                    </div>
+                `).join('')}
+            </div>
+        </div>
+    `;
+
+    // ── Achievements ─────────────────────────────────────────────────────
+    const achievHTML = state.stats.achievements.length > 0 ? `
+        <div class="db-section">
+            <div class="db-section-title">ACHIEVEMENTS (${state.stats.achievements.length})</div>
+            <div class="db-achievements">
+                ${state.stats.achievements.map(a => `<span class="db-achievement">🏆 ${a}</span>`).join('')}
+            </div>
+        </div>
+    ` : '';
+
+    // ── Render ───────────────────────────────────────────────────────────
+    content.innerHTML = `
+        <!-- Level / XP -->
+        <div class="db-section">
+            <div class="db-section-title">LEVEL ${state.stats.level}</div>
+            <div class="db-xp-bar-container">
+                <div class="db-xp-bar" style="width:${xpProgress.toFixed(1)}%"></div>
+            </div>
+            <div class="db-xp-label">${state.stats.xp} / ${xpForNext} XP to next level</div>
+        </div>
+
+        <!-- Quick stats -->
+        <div class="db-stats-row">
+            <div class="db-stat">
+                <span class="db-stat-value">${accuracy.toFixed(0)}%</span>
+                <span class="db-stat-label">ACCURACY</span>
+            </div>
+            <div class="db-stat">
+                <span class="db-stat-value">${state.stats.songsCompleted}</span>
+                <span class="db-stat-label">FINISHED</span>
+            </div>
+            <div class="db-stat">
+                <span class="db-stat-value">${minutes}</span>
+                <span class="db-stat-label">MINUTES</span>
+            </div>
+            <div class="db-stat">
+                <span class="db-stat-value">${state.stats.totalNotes}</span>
+                <span class="db-stat-label">NOTES</span>
+            </div>
+        </div>
+
+        ${intervalHTML}
+        ${songGridHTML}
+        ${achievHTML}
+    `;
+
     showScreen('stats-screen');
 }
 
@@ -2687,19 +2982,149 @@ function showWelcomeSplash() {
 }
 
 function showHowToPlay() {
+    // Delegate to the new interactive tutorial
+    showInteractiveTutorial();
+}
+
+// ============================================================================
+// INTERACTIVE 3-STEP TUTORIAL
+// ============================================================================
+
+function showInteractiveTutorial() {
     const hasSeenTutorial = localStorage.getItem('cpm_seen_tutorial');
-    if (hasSeenTutorial) return;
-    
-    const overlay = document.getElementById('how-to-play');
-    overlay.classList.add('active');
-    
-    const btn = document.getElementById('how-to-play-btn');
-    btn.addEventListener('click', () => {
-        overlay.classList.remove('active');
-        localStorage.setItem('cpm_seen_tutorial', 'true');
-        // Auto-play first fragment
+    if (hasSeenTutorial) {
+        // Normal first-play: auto-play fragment audio
         setTimeout(() => playFragmentAudio(), 500);
-    }, { once: true });
+        return;
+    }
+
+    const overlay = document.getElementById('tutorial-overlay');
+    const box     = document.getElementById('tutorial-box');
+    if (!overlay || !box) {
+        // Fallback: just auto-play
+        setTimeout(() => playFragmentAudio(), 500);
+        return;
+    }
+
+    let currentStep = -1;
+    let tutorialActive = true;
+    let actionHandler = null;
+
+    function finishTutorial() {
+        if (!tutorialActive) return;
+        tutorialActive = false;
+        document.querySelectorAll('.tutorial-focus').forEach(el => el.classList.remove('tutorial-focus'));
+        overlay.classList.remove('active');
+        box.classList.remove('active');
+        localStorage.setItem('cpm_seen_tutorial', 'true');
+    }
+
+    function setActionBtn(text, handler) {
+        const btn = document.getElementById('tutorial-action-btn');
+        if (!btn) return;
+        // Remove any previous one-time listener
+        if (actionHandler) {
+            btn.removeEventListener('click', actionHandler);
+            actionHandler = null;
+        }
+        if (text) {
+            btn.textContent = text;
+            btn.style.display = 'block';
+            actionHandler = () => {
+                if (handler) handler();
+            };
+            btn.addEventListener('click', actionHandler, { once: true });
+        } else {
+            btn.style.display = 'none';
+        }
+    }
+
+    function goToStep(step) {
+        if (!tutorialActive) return;
+        currentStep = step;
+
+        // Update step dots
+        for (let i = 0; i < 3; i++) {
+            const dot = document.getElementById(`tdot-${i}`);
+            if (dot) dot.className = `t-dot${i === step ? ' active' : ''}`;
+        }
+
+        // Remove previous highlights
+        document.querySelectorAll('.tutorial-focus').forEach(el => el.classList.remove('tutorial-focus'));
+
+        const icon  = document.getElementById('tutorial-icon');
+        const title = document.getElementById('tutorial-title');
+        const text  = document.getElementById('tutorial-text');
+
+        if (step === 0) {
+            // ── Step 1: LISTEN ────────────────────────────────────────────
+            if (icon)  icon.textContent  = '🎧';
+            if (title) title.textContent = 'STEP 1: LISTEN';
+            if (text)  text.textContent  = "Hear Bird's phrase — then try to match it";
+
+            const replayBtn = document.getElementById('replay-btn');
+            if (replayBtn) replayBtn.classList.add('tutorial-focus');
+
+            setActionBtn('► PLAY IT', () => {
+                playFragmentAudio();
+                setTimeout(() => goToStep(1), 2200);
+            });
+
+            // Auto-play after a short delay and then advance
+            setTimeout(() => {
+                if (tutorialActive && currentStep === 0) {
+                    playFragmentAudio();
+                    setTimeout(() => { if (tutorialActive && currentStep === 0) goToStep(1); }, 2200);
+                }
+            }, 700);
+
+        } else if (step === 1) {
+            // ── Step 2: MATCH PITCH ───────────────────────────────────────
+            if (icon)  icon.textContent  = '🎵';
+            if (title) title.textContent = 'STEP 2: MATCH PITCH';
+            if (text)  text.textContent  = '▲ ▼  adjust pitch   ◄ ►  move between notes';
+
+            setActionBtn(null, null);
+
+            const dpadContainer = document.querySelector('.dpad-container');
+            if (dpadContainer) dpadContainer.classList.add('tutorial-focus');
+
+            let moved = false;
+            function onDpadClick() {
+                if (!moved && tutorialActive && currentStep === 1) {
+                    moved = true;
+                    document.querySelectorAll('.dpad-btn').forEach(b => b.removeEventListener('click', onDpadClick));
+                    setTimeout(() => goToStep(2), 450);
+                }
+            }
+            document.querySelectorAll('.dpad-btn').forEach(b => b.addEventListener('click', onDpadClick));
+
+        } else if (step === 2) {
+            // ── Step 3: CHECK ─────────────────────────────────────────────
+            if (icon)  icon.textContent  = '✓';
+            if (title) title.textContent = 'STEP 3: CHECK IT!';
+            if (text)  text.textContent  = "Press CHECK when you're ready to submit";
+
+            setActionBtn(null, null);
+
+            const submitBtn = document.getElementById('submit-btn');
+            if (submitBtn) submitBtn.classList.add('tutorial-focus');
+
+            // Close tutorial when user actually submits (their existing handler runs first)
+            submitBtn && submitBtn.addEventListener('click', finishTutorial, { once: true });
+        }
+    }
+
+    // Skip button
+    const skipBtn = document.getElementById('tutorial-skip-btn');
+    if (skipBtn) {
+        skipBtn.addEventListener('click', finishTutorial, { once: true });
+    }
+
+    // Show the tutorial
+    overlay.classList.add('active');
+    box.classList.add('active');
+    goToStep(0);
 }
 
 // ============================================================================
