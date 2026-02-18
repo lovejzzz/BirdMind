@@ -155,7 +155,9 @@ const state = {
     fragmentTimeLeft: 0,     // seconds remaining
     wrongNoteIndices: [],    // wrong note indices recorded after submit
     revealingMode: false,    // true while animating wrong → correct reveal
-    showErrorFlash: false    // briefly true to flash wrong notes red (easy lives)
+    showErrorFlash: false,   // briefly true to flash wrong notes red (easy lives)
+    // Verovio rendering engine
+    _vrvToolkit: null        // Verovio toolkit instance (initialized once)
 };
 
 // ============================================================================
@@ -522,7 +524,7 @@ async function loadSongXML(song) {
             throw new Error('XML parsing failed');
         }
         
-        // Store raw XML and parsed doc for OSMD
+        // Store raw XML and parsed doc for Verovio rendering
         state.rawXML = xmlText;
         state.xmlDoc = xmlDoc;
         
@@ -1075,48 +1077,111 @@ function playFragmentAudio() {
     }, countInDuration * 1000); // close the cursor setTimeout
 }
 
+// ============================================================================
+// VEROVIO INIT — WASM-based music notation renderer
+// ============================================================================
+
+function initVerovio() {
+    return new Promise((resolve, reject) => {
+        if (state._vrvToolkit) { resolve(); return; }
+
+        const vrvGlobal = (typeof verovio !== 'undefined') ? verovio : null;
+        if (!vrvGlobal) {
+            reject(new Error('[Verovio] Script not loaded — verovio global missing'));
+            return;
+        }
+
+        function createToolkit() {
+            try {
+                state._vrvToolkit = new vrvGlobal.toolkit();
+                console.log('[Verovio] Toolkit ready');
+                resolve();
+            } catch (e) {
+                reject(e);
+            }
+        }
+
+        // Emscripten sets calledRun=true after WASM initialises
+        if (vrvGlobal.module && vrvGlobal.module.calledRun) {
+            createToolkit();
+        } else if (vrvGlobal.module) {
+            vrvGlobal.module.onRuntimeInitialized = createToolkit;
+        } else {
+            // Older bundled format — module is the top-level object
+            if (vrvGlobal.calledRun) {
+                createToolkit();
+            } else {
+                vrvGlobal.onRuntimeInitialized = createToolkit;
+            }
+        }
+    });
+}
+
+// Color all visual elements inside a Verovio g.note group
+function colorNoteGroupElements(noteGroup, color) {
+    noteGroup.querySelectorAll('use, path, rect, ellipse, circle, polygon').forEach(el => {
+        el.style.fill = color;
+        // Lines (accidentals etc.) may need stroke too
+        if (el.tagName === 'line') el.style.stroke = color;
+    });
+    // Set on group itself so inherited by any <use> that read currentColor
+    noteGroup.style.fill = color;
+}
+
 function updatePlayhead() {
     const container = document.getElementById('staff-svg');
     if (!container || !state.notePositions) return;
-    
-    // OSMD renders into an inner <svg> — find it
-    const svg = container.querySelector('svg') || container;
-    
+
+    const svg = container.querySelector('svg');
+    if (!svg) return;
+
     // Remove old playhead
     const old = svg.querySelector('#playhead-line');
     if (old) old.remove();
     const oldGlow = svg.querySelector('#playhead-glow');
     if (oldGlow) oldGlow.remove();
-    
+
     const idx = state.playbackCursorIndex;
     if (idx < 0 || idx >= state.notePositions.length) return;
-    
+
     const x = state.notePositions[idx];
-    
-    // Get staff bounds from OSMD's rendered SVG
-    const svgRect = svg.getBoundingClientRect();
-    const topLine = 0;
-    const bottomLine = svg.getAttribute('height') ? parseFloat(svg.getAttribute('height')) : svgRect.height;
-    
+
+    // Verovio SVG uses viewBox coordinates — parse for height and scale
+    const vbAttr = svg.getAttribute('viewBox');
+    let vbWidth = 2100, vbHeight = 2000;
+    if (vbAttr) {
+        const parts = vbAttr.trim().split(/[\s,]+/);
+        if (parts.length >= 4) {
+            vbWidth  = parseFloat(parts[2]);
+            vbHeight = parseFloat(parts[3]);
+        }
+    }
+
+    // Convert px stroke sizes to viewBox units
+    const svgPxWidth = container.clientWidth || 350;
+    const unitsPerPx = vbWidth / svgPxWidth;
+    const strokeWidth = Math.round(2.5 * unitsPerPx);
+    const glowHalf   = Math.round(15 * unitsPerPx);
+
     // Glow background
     svg.appendChild(createSVGElement('rect', {
         id: 'playhead-glow',
-        x: x - 15,
-        y: topLine,
-        width: 30,
-        height: bottomLine,
+        x: x - glowHalf,
+        y: 0,
+        width: glowHalf * 2,
+        height: vbHeight,
         fill: '#ff8c00',
         opacity: 0.08,
-        rx: 3
+        rx: strokeWidth
     }));
-    
+
     // Playhead line
     svg.appendChild(createSVGElement('line', {
         id: 'playhead-line',
-        x1: x, y1: topLine,
-        x2: x, y2: bottomLine,
+        x1: x, y1: 0,
+        x2: x, y2: vbHeight,
         stroke: 'white',
-        'stroke-width': 2.5,
+        'stroke-width': strokeWidth,
         opacity: 0.9,
         'stroke-linecap': 'round'
     }));
@@ -1327,94 +1392,94 @@ function buildFragmentXML(fragment, xmlDoc, timeSig, keySig, divisions) {
 
 function renderStaff() {
     const container = document.getElementById('staff-svg');
-    
-    // OSMD needs a visible container with width > 0
-    // If container has no width yet (screen not shown), defer rendering
+
+    // Defer if container has no width yet (screen not visible)
     if (container.clientWidth === 0) {
-        setTimeout(() => renderStaff(), 500);
+        setTimeout(() => renderStaff(), 200);
         return;
     }
-    
+
     const fragment = state.currentFragment;
     if (!fragment || fragment.length === 0) return;
-    
-    const divisions = state.currentSongData?.divisions || 120;
-    const timeSig = state.currentSongData?.timeSignature || { beats: 4, beatType: 4 };
-    const keySig = state.currentSongData?.keySignature || { fifths: 0 };
-    const xmlDoc = state.xmlDoc;
-    
-    if (!xmlDoc) {
-        console.error('No XML document available for OSMD rendering');
+
+    // Verovio must be initialised — retry if not ready
+    const tk = state._vrvToolkit;
+    if (!tk) {
+        setTimeout(() => renderStaff(), 100);
         return;
     }
-    
-    // Build fragment XML
+
+    const divisions = state.currentSongData?.divisions || 120;
+    const timeSig   = state.currentSongData?.timeSignature || { beats: 4, beatType: 4 };
+    const keySig    = state.currentSongData?.keySignature  || { fifths: 0 };
+    const xmlDoc    = state.xmlDoc;
+
+    if (!xmlDoc) {
+        console.error('[Verovio] No xmlDoc available');
+        return;
+    }
+
+    // Build MusicXML from current fragment + user pitches
     const fragmentXML = buildFragmentXML(fragment, xmlDoc, timeSig, keySig, divisions);
     if (!fragmentXML) {
-        console.error('Failed to build fragment XML');
+        console.error('[Verovio] buildFragmentXML returned null');
         return;
     }
-    
-    // Debounce rapid re-renders (e.g. holding arrow key)
-    if (state._renderPending) {
-        state._renderQueued = fragmentXML; // store latest, will be picked up
-        return;
-    }
-    state._renderPending = true;
-    
-    // Reuse OSMD instance if possible, create if needed
-    if (!state._osmdInstance) {
-        container.innerHTML = '';
-        state._osmdInstance = new opensheetmusicdisplay.OpenSheetMusicDisplay(container, {
-            backend: "svg",
-            drawTitle: false,
-            drawSubtitle: false,
-            drawComposer: false,
-            drawCredits: false,
-            drawPartNames: false,
-            drawPartAbbreviations: false,
-            drawMeasureNumbers: false,
-            autoResize: false
-        });
-    }
-    
-    const osmd = state._osmdInstance;
-    
-    // Load and render — double-buffer: don't clear old SVG until new one is ready
-    osmd.load(fragmentXML).then(() => {
-        osmd.render();
-        state._renderPending = false;
-        
-        // Post-process: apply orange theme and extract note positions
-        requestAnimationFrame(() => {
-            applyOrangeTheme();
-            colorNotesBasedOnGameState();
-            extractNotePositions();
-            updateIntervalDisplay();
-        });
-        
-        // If another render was queued while we were busy, do it now
-        if (state._renderQueued) {
-            const queued = state._renderQueued;
-            state._renderQueued = null;
-            renderStaff();
-        }
-    }).catch(err => {
-        state._renderPending = false;
-        state._renderQueued = null;
-        console.error('OSMD rendering error:', err);
+
+    // Configure Verovio for this container width
+    const containerWidth = container.clientWidth;
+    const scale = 40; // percent
+    const pageWidth = Math.round(containerWidth * 100 / scale);
+
+    tk.setOptions({
+        scale:             scale,
+        pageWidth:         pageWidth,
+        pageHeight:        20000,      // large; adjustPageHeight shrinks it
+        adjustPageHeight:  1,
+        adjustPageWidth:   0,
+        header:            'none',
+        footer:            'none',
+        spacingLinear:     0.20,
+        spacingNonLinear:  0.45,
+        svgViewBox:        1,
+        svgBoundingBoxes:  1,
+        font:              'Leipzig',  // standard SMuFL font bundled in Verovio
+        noLayout:          0,
+        condenseFirstPage: 0,
     });
-    
-    function applyOrangeTheme() {
-        const svg = container.querySelector('svg');
-        if (!svg) return;
-        
-        // Set all strokes and fills to orange
-        svg.querySelectorAll('path, line, rect, text, ellipse, circle').forEach(el => {
-            const fill = el.getAttribute('fill');
+
+    // SYNCHRONOUS load + render (no blink, no async, no debounce needed)
+    const loaded = tk.loadData(fragmentXML);
+    if (!loaded) {
+        console.warn('[Verovio] loadData returned false — invalid MusicXML?');
+        return;
+    }
+    const svgString = tk.renderToSVG(1); // page 1
+
+    // Swap into DOM
+    container.innerHTML = svgString;
+
+    // Post-process synchronously (DOM is ready immediately after innerHTML)
+    const svg = container.querySelector('svg');
+    if (svg) {
+        svg.style.width  = '100%';
+        svg.style.height = 'auto';
+        svg.style.display = 'block';
+
+        applyOrangeTheme(svg);
+        colorNotesBasedOnGameState();
+        extractNotePositions();
+        updateIntervalDisplay();
+    }
+
+    // ── Inner helpers ──────────────────────────────────────────────────────
+
+    function applyOrangeTheme(svgEl) {
+        // Color every painted element orange; notes will be re-colored below
+        svgEl.querySelectorAll('path, line, rect, use, polygon, ellipse, circle, text').forEach(el => {
+            const fill   = el.getAttribute('fill');
             const stroke = el.getAttribute('stroke');
-            
-            if (fill && fill !== 'none' && fill !== 'transparent') {
+            if (el.tagName === 'use' || (fill && fill !== 'none' && fill !== 'transparent')) {
                 el.style.fill = '#FF8C00';
             }
             if (stroke && stroke !== 'none' && stroke !== 'transparent') {
@@ -1422,54 +1487,44 @@ function renderStaff() {
             }
         });
     }
-    
+
     function colorNotesBasedOnGameState() {
-        const svg = container.querySelector('svg');
-        if (!svg) return;
-        
-        // Find all note heads (OSMD renders with vf-notehead class)
-        const noteheads = svg.querySelectorAll('.vf-notehead');
-        
-        noteheads.forEach((notehead, i) => {
+        const svgEl = container.querySelector('svg');
+        if (!svgEl) return;
+
+        // Verovio SVG: pitched notes → g.note, rests → g.rest
+        // We only care about g.note; their order in the DOM matches XML order
+        const noteGroups = svgEl.querySelectorAll('g.note');
+
+        noteGroups.forEach((noteGroup, i) => {
             if (i >= fragment.length) return;
-            
+
             const isFree     = state.freeNoteIndices.includes(i);
             const isSelected = i === state.selectedNoteIndex;
             const isCorrect  = state.userPitches[i] === fragment[i].midi;
             const isRevealed = state.revealingMode && state.wrongNoteIndices.includes(i);
-            
+
             let color = '#FF8C00'; // default orange
             if (state.submitted || state.showErrorFlash) {
                 if (isRevealed) {
-                    color = '#00CCCC'; // teal/cyan for animated reveal
+                    color = '#00CCCC';         // teal during reveal animation
                 } else {
                     color = isCorrect ? '#00FF00' : '#FF4444';
                 }
             } else if (isFree && !isSelected) {
-                color = '#00CCCC'; // cyan for given-free reference note
+                color = '#00CCCC';             // cyan: given/free reference note
             } else if (isSelected) {
-                color = '#FFFFFF';
+                color = '#FFFFFF';             // white: currently selected
             }
-            
-            // Color the notehead and its parent group (stem, beams, flags, etc.)
-            const noteGroup = notehead.closest('.vf-stavenote');
-            if (noteGroup) {
-                noteGroup.querySelectorAll('path, line, rect, ellipse, circle').forEach(el => {
-                    el.style.fill = color;
-                    el.style.stroke = color;
-                });
-            } else {
-                notehead.style.fill = color;
-                notehead.style.stroke = color;
-            }
+
+            colorNoteGroupElements(noteGroup, color);
         });
-        
-        // --- Feature: Reveal animation — trigger per-note sound + pulse ---
+
+        // Reveal animation: sound + colour pulse for wrong notes
         if (state.revealingMode && state.wrongNoteIndices.length > 0) {
-            const fragSnapshot = fragment; // capture current fragment in closure
+            const fragSnapshot = fragment;
             state.wrongNoteIndices.forEach((noteIdx, i) => {
                 setTimeout(() => {
-                    // Guard: still on same fragment and still revealing
                     if (state.currentFragment !== fragSnapshot || !state.revealingMode) return;
                     playPreviewNote(fragSnapshot[noteIdx].midi);
                     animateRevealNote(noteIdx);
@@ -1477,29 +1532,31 @@ function renderStaff() {
             });
         }
     }
-    
+
     function extractNotePositions() {
-        const svg = container.querySelector('svg');
-        if (!svg) return;
-        
+        const svgEl = container.querySelector('svg');
+        if (!svgEl) return;
+
         state.notePositions = [];
-        const noteheads = svg.querySelectorAll('.vf-notehead');
-        
-        noteheads.forEach((notehead, i) => {
+        const noteGroups = svgEl.querySelectorAll('g.note');
+
+        noteGroups.forEach((noteGroup, i) => {
             if (i < fragment.length) {
-                const bbox = notehead.getBBox();
-                const ctm = notehead.getCTM();
-                // Get absolute x position
-                state.notePositions[i] = ctm ? ctm.e + bbox.x : bbox.x;
+                try {
+                    const bbox = noteGroup.getBBox();
+                    // getBBox returns viewBox coords — use centre x for playhead
+                    state.notePositions[i] = bbox.x + bbox.width / 2;
+                } catch (_) { /* hidden element */ }
             }
         });
     }
-    
+
     function updateIntervalDisplay() {
-        if (!state.submitted && state.selectedNoteIndex >= 0 && state.selectedNoteIndex < state.userPitches.length) {
-            const userMidi = state.userPitches[state.selectedNoteIndex];
-            const noteName = midiToNoteName(userMidi, true);
-            const display = document.getElementById('interval-display');
+        if (!state.submitted &&
+            state.selectedNoteIndex >= 0 &&
+            state.selectedNoteIndex < state.userPitches.length) {
+            const noteName = midiToNoteName(state.userPitches[state.selectedNoteIndex], true);
+            const display  = document.getElementById('interval-display');
             if (display) {
                 display.textContent = '▲ ' + noteName;
                 display.style.color = '#FFFFFF';
@@ -1826,9 +1883,7 @@ function loadFragment(index) {
     document.getElementById('show-answer-btn').style.display = 'flex';
     document.getElementById('undo-btn').style.display = 'flex';
     
-    // Clear cached OSMD instance for fresh fragment render
-    state._osmdInstance = null;
-    state._renderPending = false;
+    // Clear staff for fresh fragment render (Verovio toolkit is reused, not recreated)
     document.getElementById('staff-svg').innerHTML = '';
     
     // Render staff
@@ -2458,18 +2513,22 @@ function revealCorrectNotes() {
 
 // Animate a single note reveal: pulse cyan → white → cyan
 function animateRevealNote(noteIdx) {
-    const svg = document.getElementById('staff-svg');
-    if (!svg) return;
-    const noteheads = svg.querySelectorAll('.vf-notehead');
-    if (noteIdx >= noteheads.length) return;
-    
-    const noteGroup = noteheads[noteIdx].closest('.vf-stavenote') || noteheads[noteIdx];
+    const container = document.getElementById('staff-svg');
+    if (!container) return;
+    const svgEl = container.querySelector('svg');
+    if (!svgEl) return;
+
+    // Verovio: pitched notes are g.note elements (in DOM order = XML order)
+    const noteGroups = svgEl.querySelectorAll('g.note');
+    if (noteIdx >= noteGroups.length) return;
+
+    const noteGroup  = noteGroups[noteIdx];
     const startColor = [0, 204, 204];   // cyan
     const midColor   = [255, 255, 255]; // white flash
     const endColor   = [0, 204, 204];   // back to cyan
     let startTs = null;
     const duration = 500;
-    
+
     function step(ts) {
         if (!startTs) startTs = ts;
         const p = Math.min((ts - startTs) / duration, 1);
@@ -2485,11 +2544,8 @@ function animateRevealNote(noteIdx) {
             g = Math.round(midColor[1] + (endColor[1] - midColor[1]) * pp);
             b = Math.round(midColor[2] + (endColor[2] - midColor[2]) * pp);
         }
-        const color = `rgb(${r},${g},${b})`;
-        noteGroup.querySelectorAll('path, ellipse, circle, rect').forEach(el => {
-            el.style.fill = color;
-            el.style.stroke = color;
-        });
+        // colorNoteGroupElements applies fill to all visual children
+        colorNoteGroupElements(noteGroup, `rgb(${r},${g},${b})`);
         if (p < 1) requestAnimationFrame(step);
     }
     requestAnimationFrame(step);
@@ -3404,6 +3460,10 @@ async function init() {
     
     // PRIORITY 3.10: Show welcome splash (first visit only)
     showWelcomeSplash();
+
+    // Kick off Verovio WASM init in background (non-blocking)
+    // renderStaff() will retry until state._vrvToolkit is available
+    initVerovio().catch(err => console.warn('[Verovio] init error:', err));
     
     await discoverSongs();
     renderSongList();

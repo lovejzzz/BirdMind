@@ -11,6 +11,11 @@
     <link rel="icon" type="image/svg+xml" href="favicon.svg">
     <link rel="manifest" href="manifest.json">
     <link rel="stylesheet" href="game.css?v=5">
+    <style>
+        /* Verovio SVG fills container, orange on dark */
+        #staff-svg svg { display: block; width: 100%; height: auto; }
+        #staff-svg svg * { vector-effect: none; }
+    </style>
 </head>
 <body style="overscroll-behavior: none; touch-action: manipulation;">
     <!-- Song Selection Screen -->
@@ -282,8 +287,8 @@
     </div>
 
     <script src="./assets/tone.min.js"></script>
-    <script src="./assets/osmd.min.js"></script>
-    <script src="game.js?v=16"></script>
+    <script src="./assets/verovio-toolkit-wasm.js"></script>
+    <script src="game.js?v=17"></script>
     <script>
         // Register Service Worker for offline support
         if ('serviceWorker' in navigator) {
