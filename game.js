@@ -1076,8 +1076,11 @@ function playFragmentAudio() {
 }
 
 function updatePlayhead() {
-    const svg = document.getElementById('staff-svg');
-    if (!svg || !state.notePositions) return;
+    const container = document.getElementById('staff-svg');
+    if (!container || !state.notePositions) return;
+    
+    // OSMD renders into an inner <svg> — find it
+    const svg = container.querySelector('svg') || container;
     
     // Remove old playhead
     const old = svg.querySelector('#playhead-line');
@@ -1089,18 +1092,20 @@ function updatePlayhead() {
     if (idx < 0 || idx >= state.notePositions.length) return;
     
     const x = state.notePositions[idx];
-    const config = getStaffConfig();
-    const topLine = config.topLine;
-    const bottomLine = topLine + (config.lines - 1) * config.lineSpacing;
+    
+    // Get staff bounds from OSMD's rendered SVG
+    const svgRect = svg.getBoundingClientRect();
+    const topLine = 0;
+    const bottomLine = svg.getAttribute('height') ? parseFloat(svg.getAttribute('height')) : svgRect.height;
     
     // Glow background
     svg.appendChild(createSVGElement('rect', {
         id: 'playhead-glow',
         x: x - 15,
-        y: topLine - 5,
+        y: topLine,
         width: 30,
-        height: bottomLine - topLine + 10,
-        fill: 'var(--fg)',
+        height: bottomLine,
+        fill: '#ff8c00',
         opacity: 0.08,
         rx: 3
     }));
@@ -1108,8 +1113,8 @@ function updatePlayhead() {
     // Playhead line
     svg.appendChild(createSVGElement('line', {
         id: 'playhead-line',
-        x1: x, y1: topLine - 8,
-        x2: x, y2: bottomLine + 8,
+        x1: x, y1: topLine,
+        x2: x, y2: bottomLine,
         stroke: 'white',
         'stroke-width': 2.5,
         opacity: 0.9,
@@ -1129,7 +1134,8 @@ function stopPlaybackCursor() {
         state.playbackTimeout = null;
     }
     // Remove playhead elements
-    const svg = document.getElementById('staff-svg');
+    const container = document.getElementById('staff-svg');
+    const svg = container ? (container.querySelector('svg') || container) : null;
     if (svg) {
         const ph = svg.querySelector('#playhead-line');
         if (ph) ph.remove();
